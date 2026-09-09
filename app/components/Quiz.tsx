@@ -1,10 +1,10 @@
 'use client'
 
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useEffect } from 'react'
 import { QuizQuestion } from '../data/quiz'
 import QuestionCard from './QuestionCard'
 import ResultsCard from './ResultsCard'
-import { ChevronRight, ChevronLeft, BookOpen } from 'lucide-react'
+import { ChevronRight, ChevronLeft, BookOpen, RotateCcw } from 'lucide-react'
 
 interface QuizProps {
   questions: QuizQuestion[]
@@ -16,11 +16,85 @@ interface TopicScore {
   correct: number
 }
 
+const STORAGE_KEY = 'gcp-pde-quiz-progress-v1'
+const STORAGE_VERSION = 1
+const MAX_AGE_MS = 15 * 24 * 60 * 60 * 1000
+
+interface StoredProgress {
+  version: number
+  updatedAt: string
+  currentIndex: number
+  selectedAnswers: Record<number, number>
+  answeredQuestions: number[]
+  showResults: boolean
+}
+
 export default function Quiz({ questions, onReferenceSelect }: QuizProps) {
   const [currentIndex, setCurrentIndex] = useState(0)
   const [selectedAnswers, setSelectedAnswers] = useState<Record<number, number>>({})
   const [showResults, setShowResults] = useState(false)
   const [answeredQuestions, setAnsweredQuestions] = useState<Set<number>>(new Set())
+  const [hydrated, setHydrated] = useState(false)
+
+  // Restore persisted progress on mount (client-only, avoids SSR/hydration mismatch)
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(STORAGE_KEY)
+      if (raw) {
+        const parsed: StoredProgress = JSON.parse(raw)
+        const age = Date.now() - new Date(parsed.updatedAt).getTime()
+        const isFresh = Number.isFinite(age) && age <= MAX_AGE_MS
+
+        if (isFresh && parsed.version === STORAGE_VERSION) {
+          const validIds = new Set(questions.map(q => q.id))
+
+          const restoredAnswers: Record<number, number> = {}
+          Object.entries(parsed.selectedAnswers || {}).forEach(([idStr, optionIndex]) => {
+            const id = Number(idStr)
+            const question = questions.find(q => q.id === id)
+            if (question && validIds.has(id) && question.options[optionIndex] !== undefined) {
+              restoredAnswers[id] = optionIndex
+            }
+          })
+
+          const restoredAnswered = new Set(
+            (parsed.answeredQuestions || []).filter(id => validIds.has(id) && id in restoredAnswers)
+          )
+
+          const clampedIndex = Math.min(Math.max(parsed.currentIndex || 0, 0), questions.length - 1)
+
+          setSelectedAnswers(restoredAnswers)
+          setAnsweredQuestions(restoredAnswered)
+          setCurrentIndex(clampedIndex)
+          setShowResults(Boolean(parsed.showResults))
+        } else {
+          window.localStorage.removeItem(STORAGE_KEY)
+        }
+      }
+    } catch {
+      window.localStorage.removeItem(STORAGE_KEY)
+    }
+    setHydrated(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Persist progress on every relevant change, once hydrated
+  useEffect(() => {
+    if (!hydrated) return
+    const progress: StoredProgress = {
+      version: STORAGE_VERSION,
+      updatedAt: new Date().toISOString(),
+      currentIndex,
+      selectedAnswers,
+      answeredQuestions: Array.from(answeredQuestions),
+      showResults,
+    }
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(progress))
+    } catch {
+      // localStorage unavailable (e.g. private browsing quota) — progress just won't persist
+    }
+  }, [hydrated, currentIndex, selectedAnswers, answeredQuestions, showResults])
 
   const currentQuestion = questions[currentIndex]
   const isAnswered = answeredQuestions.has(currentQuestion.id)
@@ -82,10 +156,25 @@ export default function Quiz({ questions, onReferenceSelect }: QuizProps) {
   }
 
   const handleRestart = () => {
+    try {
+      window.localStorage.removeItem(STORAGE_KEY)
+    } catch {
+      // ignore
+    }
     setCurrentIndex(0)
     setSelectedAnswers({})
     setShowResults(false)
     setAnsweredQuestions(new Set())
+  }
+
+  const handleResetClick = () => {
+    if (window.confirm('Reset your quiz progress? This will clear all your answers and start from question 1.')) {
+      handleRestart()
+    }
+  }
+
+  if (!hydrated) {
+    return <div className="w-full max-w-4xl mx-auto px-4 py-6 sm:py-8" />
   }
 
   if (showResults) {
@@ -111,9 +200,18 @@ export default function Quiz({ questions, onReferenceSelect }: QuizProps) {
           <span className="text-sm font-medium text-gray-600 dark:text-gray-400">
             Question {currentIndex + 1} of {questions.length}
           </span>
-          <span className="text-sm font-medium text-gray-600 dark:text-gray-400">
-            {answeredQuestions.size} answered
-          </span>
+          <div className="flex items-center gap-4">
+            <span className="text-sm font-medium text-gray-600 dark:text-gray-400">
+              {answeredQuestions.size} answered
+            </span>
+            <button
+              onClick={handleResetClick}
+              className="flex items-center gap-1.5 text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-red-600 dark:hover:text-red-400 transition-colors"
+            >
+              <RotateCcw size={14} />
+              Reset progress
+            </button>
+          </div>
         </div>
         <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
           <div
