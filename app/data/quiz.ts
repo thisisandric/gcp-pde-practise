@@ -100,7 +100,7 @@ export const quizQuestions: QuizQuestion[] = [
     topic: "Dataproc",
     difficulty: "medium",
     options: [
-      { text: "Replace 10 workers with preemptible instances (save $0.19→$0.057/vcpu/hr)", correct: true },
+      { text: "Replace 10 workers with preemptible instances (save ~$0.19→$0.057 per n1-standard-4 VM/hr)", correct: true },
       { text: "Downsize to n1-standard-2 (half the vCPU)", correct: false },
       { text: "Run the job only once per week instead of daily", correct: false },
       { text: "Use Dataflow instead of Dataproc", correct: false }
@@ -126,32 +126,32 @@ export const quizQuestions: QuizQuestion[] = [
   },
   {
     id: 8,
-    question: "A Pub/Sub topic receives 500 messages/sec on average. The topic has a single subscription with 50 subscribers pulling concurrently. Throughput feels bottlenecked during spikes (1000 msg/sec). What's the root cause?",
+    question: "A Pub/Sub topic receives 500 messages/sec on average (5 KB each, well under any regional throughput quota). The topic has a single subscription with 50 subscribers pulling concurrently, each client using default flow-control settings. Throughput feels bottlenecked during spikes (1000 msg/sec), with growing oldest-unacked-message age. What's the most likely root cause?",
     topic: "Pub/Sub",
     difficulty: "hard",
     options: [
-      { text: "Subscription quota (default 1K msg/sec per topic) is the hard limit", correct: true },
-      { text: "50 subscribers is too many; reduce to 10", correct: false },
+      { text: "Client-side flow control (maxOutstandingMessages / maxOutstandingBytes) is capping how many unacked messages each subscriber pulls before backing off", correct: true },
+      { text: "Pub/Sub enforces a hard default quota of 1,000 messages/sec per topic", correct: false },
       { text: "Message size is too large; compress to <1 KB", correct: false },
       { text: "Pub/Sub pricing is throttling throughput", correct: false }
     ],
-    explanation: "Pub/Sub's default quota is 1,000 messages/sec per topic. At 1000 msg/sec spikes, you're hitting the hard limit. Fix: request a quota increase from Google Cloud Console (free, just administratively gated).",
-    bestPractice: "Request quota increases proactively. For high-throughput topics (10K+ msg/sec), contact Google in advance.",
+    explanation: "Pub/Sub has no default per-topic or per-subscription messages-per-second quota — throughput quotas are regional and measured in throughput (hundreds of MB/s to several GB/s per region), far above 1000 msg/sec at 5 KB each (~5 MB/s). The realistic bottleneck at this scale is client-side: the subscriber client library's flow control caps outstanding (unacked) messages/bytes per client, and if that cap is too low relative to per-message processing time, throughput stalls even though the service could deliver far more.",
+    bestPractice: "Tune maxOutstandingMessages/maxOutstandingBytes flow-control settings (and processing concurrency) before assuming you've hit a Pub/Sub service quota — the default regional throughput quotas are high enough that most workloads never approach them.",
     references: ["pubsub-quota", "pubsub-scaling", "pubsub-throughput"]
   },
   {
     id: 9,
-    question: "Your data pipeline ingests 500 GB daily via Cloud Data Transfer Service into Cloud Storage, then loads into BigQuery nightly. What is the cost of the data transfer step?",
+    question: "Your data pipeline ingests 500 GB daily via Storage Transfer Service into Cloud Storage, then loads into BigQuery nightly. What is the cost of the data transfer step?",
     topic: "Data Ingestion",
     difficulty: "easy",
     options: [
-      { text: "FREE for intra-GCP transfers (DTS only charges if data leaves GCP)", correct: true },
+      { text: "No separate Storage Transfer Service fee (Google does not charge for the transfer itself); you pay GCS storage and any source-side egress the origin provider charges", correct: true },
       { text: "$0.02/GB (standard egress rate)", correct: false },
       { text: "$0.12/GB (internet egress rate)", correct: false },
       { text: "Depends on source (on-prem = $0.02/GB, AWS = $0.10/GB)", correct: false }
     ],
-    explanation: "Cloud Data Transfer Service is a managed Google product. Intra-GCP transfers are FREE. You only pay for storage (GCS) and query (BigQuery).",
-    bestPractice: "Use DTS for one-time or scheduled imports from on-prem / third-party cloud. No transfer fee within GCP.",
+    explanation: "Storage Transfer Service itself has no per-GB service fee on the Google Cloud side. You pay for the resulting GCS storage and for BigQuery queries as usual. If the source is another cloud (e.g., AWS S3), that provider may bill its own egress to move data out — that's a charge from the source cloud, not from Google.",
+    bestPractice: "Use Storage Transfer Service for scheduled or one-time bulk imports from on-prem, S3, or Azure Blob into Cloud Storage. Use BigQuery Data Transfer Service instead when loading directly and recurringly from supported SaaS sources (or Amazon S3/Redshift) straight into BigQuery tables.",
     references: ["dts-overview", "data-transfer-cost", "gcs-egress"]
   },
   {
@@ -498,6 +498,456 @@ export const quizQuestions: QuizQuestion[] = [
     explanation: "Each requirement maps to a distinct control. Cloud DLP de-identification tokenizes or masks SSNs/names so analysts see redacted values while aggregate queries over other columns still function. VPC Service Controls establishes a service perimeter that blocks data movement to resources outside it, such as a personal Cloud Storage bucket, even with valid credentials, which directly addresses exfiltration. CMEK via Cloud KMS lets the security team destroy a key version themselves, instantly rendering all CMEK-protected data unreadable independent of Google. CSEK isn't supported on BigQuery at all, so it cannot serve requirement 3 here; IAM roles alone don't mask column contents; policy tags govern column access but provide neither a network exfiltration boundary nor customer-held key destruction.",
     bestPractice: "Layer controls by the specific risk each addresses: DLP for content-level de-identification, VPC Service Controls for network/API exfiltration boundaries, and CMEK for customer-controlled cryptographic destruction — no single control covers all three.",
     references: ["security-dlp-vpcsc", "cmek-encryption"]
+  },
+  {
+    id: 33,
+    question: "A team runs Spark ETL jobs a few times a week (20-40 minutes each). They don't want to size, patch, or otherwise manage a cluster, and want built-in autoscaling with billing only while a job actually executes.",
+    topic: "Dataproc",
+    difficulty: "medium",
+    options: [
+      { text: "Dataproc Serverless for Spark (batch workloads): submit the job with no cluster to provision, autoscaling on by default, billed only for execution time", correct: true },
+      { text: "A persistent Dataproc cluster sized for peak load, left running all week", correct: false },
+      { text: "An ephemeral Dataproc cluster the team manually sizes and deletes before and after each job", correct: false },
+      { text: "Dataflow, since it replaces the need for Spark entirely", correct: false }
+    ],
+    explanation: "Dataproc Serverless for Spark runs batch workloads without provisioning or sizing a cluster, autoscales by default using Spark's dynamic resource allocation, and bills only for the time the workload executes — directly matching a team that wants zero cluster management for intermittent jobs. A manually-sized ephemeral cluster still requires sizing decisions; a persistent cluster wastes idle cost; Dataflow would require rewriting existing Spark code in Apache Beam.",
+    bestPractice: "Use Dataproc Serverless when Spark jobs are intermittent and don't need custom cluster init actions or a warm cluster shared across a job sequence; use an ephemeral cluster when those customizations are required.",
+    references: ["dataproc-serverless", "dataproc-config"]
+  },
+  {
+    id: 34,
+    question: "An on-prem Hadoop cluster with 500 TB in HDFS is being migrated to Dataproc on GCP. The team wants storage decoupled from compute so clusters can be resized or deleted independently without risking data loss, and wants idle compute cost minimized.",
+    topic: "Dataproc",
+    difficulty: "medium",
+    options: [
+      { text: "Move the data into Cloud Storage and point Spark/Hadoop jobs at gs:// paths via the Cloud Storage connector, keeping Dataproc clusters ephemeral", correct: true },
+      { text: "Replicate HDFS onto Dataproc persistent disks and keep the cluster running continuously", correct: false },
+      { text: "Leave the data in on-prem HDFS and have Dataproc read it over the network on each run", correct: false },
+      { text: "Move the data into Bigtable and treat it as the cluster's distributed filesystem", correct: false }
+    ],
+    explanation: "The standard GCP migration pattern moves durable data out of HDFS into Cloud Storage, then has jobs read/write via the Cloud Storage connector instead of a cluster-local HDFS. This decouples storage lifecycle from compute lifecycle: clusters can be created, autoscaled, or deleted freely because durability lives in GCS, not on cluster disks. Keeping data on-prem adds latency/egress on every run; Bigtable is not a general-purpose filesystem for Spark job I/O.",
+    bestPractice: "Treat on-cluster HDFS as ephemeral scratch space for shuffle/intermediate data only; durable input and output data belongs in Cloud Storage.",
+    references: ["dataproc-config", "gcs-storage-classes"]
+  },
+  {
+    id: 35,
+    question: "A team repeatedly recreates similar Dataproc clusters to run the same ordered sequence of four Spark/Hadoop jobs against different datasets each week, and wants a reusable, parameterized definition without adopting a separate orchestrator.",
+    topic: "Dataproc",
+    difficulty: "medium",
+    options: [
+      { text: "Dataproc Workflow Templates: define the cluster spec and the ordered job DAG once, then instantiate it with different parameters per run", correct: true },
+      { text: "A shell script that issues sequential gcloud dataproc jobs submit calls", correct: false },
+      { text: "Cloud Composer, since only Airflow can express job dependencies", correct: false },
+      { text: "Cloud Scheduler triggering all four jobs at fixed time offsets", correct: false }
+    ],
+    explanation: "Dataproc Workflow Templates define a cluster (ephemeral or existing) plus a DAG of jobs as one reusable, parameterizable resource, with managed dependency ordering and automatic cluster lifecycle (create, run jobs, delete) — solving exactly a single-cluster, ordered-job-sequence need. A shell script reinvents dependency/retry handling; Composer adds orchestration overhead unneeded for a single-system job sequence; Cloud Scheduler provides no dependency guarantees between jobs.",
+    bestPractice: "Use Workflow Templates when the entire orchestration need is one cluster running an ordered set of Dataproc jobs; reach for Composer only when the DAG spans multiple external systems beyond Dataproc.",
+    references: ["dataproc-config", "composer-orchestration"]
+  },
+  {
+    id: 36,
+    question: "A business team with no engineering background needs to build ETL pipelines pulling from 15 heterogeneous sources (Salesforce, SQL Server, flat files) into BigQuery, using a visual interface and reusable connectors, without writing Beam or Spark code.",
+    topic: "Data Fusion",
+    difficulty: "medium",
+    options: [
+      { text: "Cloud Data Fusion, using its visual pipeline studio and pre-built source/sink connectors, which executes pipelines on managed Dataproc under the hood", correct: true },
+      { text: "Hand-write a separate Apache Beam (Dataflow) pipeline in Java for each of the 15 sources", correct: false },
+      { text: "Dataform, since it can connect directly to any external source via SQL", correct: false },
+      { text: "BigQuery Data Transfer Service for all 15 sources", correct: false }
+    ],
+    explanation: "Data Fusion is built for exactly this: a no/low-code, GUI-based ETL tool with a broad connector/plugin library for heterogeneous sources, letting non-engineers assemble pipelines visually while it runs the actual execution as managed Dataproc/Spark jobs behind the scenes. Hand-written Beam code requires engineering skill per source; Dataform only transforms data already inside BigQuery and cannot extract from SQL Server or Salesforce; BigQuery Data Transfer Service only covers a specific, limited set of supported SaaS/warehouse sources, not arbitrary on-prem databases via a visual designer.",
+    bestPractice: "Choose Data Fusion when both the authoring constraint (visual, non-engineer-friendly) and source heterogeneity matter; choose hand-coded Dataflow when transformation logic is too custom for available plugins.",
+    references: ["data-fusion-overview", "service-selection"]
+  },
+  {
+    id: 37,
+    question: "An organization's data is spread across 30 GCS buckets and 50 BigQuery datasets with no consistent access or quality controls. Leadership wants the data organized into logical business domains with unified discovery, access policy, and automated data-quality checks, without physically moving the underlying data.",
+    topic: "Dataplex",
+    difficulty: "hard",
+    options: [
+      { text: "Dataplex: organize the existing buckets and datasets into lakes and zones (e.g., raw vs. curated) by business domain, applying unified discovery, access policy, and automated data-quality tasks at the zone level without copying data", correct: true },
+      { text: "Physically migrate all data into a single BigQuery project organized by dataset naming convention", correct: false },
+      { text: "Analytics Hub, since it can group any resource into a shared domain", correct: false },
+      { text: "Apply IAM conditions directly on each individual bucket and dataset", correct: false }
+    ],
+    explanation: "Dataplex provides a logical management layer (lakes containing zones) over existing GCS buckets and BigQuery datasets without moving data, attaching unified metadata, access policy, and data-quality/profiling tasks at the zone level — matching the 'organize without migrating' requirement directly. Physically migrating everything into one project is costly and unnecessary just for organization; Analytics Hub is for externally publishing curated data as shareable listings, not for internally governing your own lake; per-resource IAM conditions alone give access control but no unified discovery or zone-level quality automation.",
+    bestPractice: "Model Dataplex lakes and zones around business domains and raw-vs-curated data maturity, letting Dataplex apply consistent governance and quality tasks across underlying BigQuery/GCS assets rather than re-architecting storage.",
+    references: ["dataplex-governance", "data-catalog-lineage"]
+  },
+  {
+    id: 38,
+    question: "A data lake stores Parquet files in Cloud Storage, queried both via BigQuery external tables and a separate Spark job on Dataproc. Security requires row-level and column-level access control enforced identically for both engines, without duplicating policy definitions per engine.",
+    topic: "BigLake",
+    difficulty: "medium",
+    options: [
+      { text: "Convert the external tables to BigLake tables and define row-level and column-level security policies once on the BigLake table, enforced consistently for both BigQuery and Spark access to the same files", correct: true },
+      { text: "Define the row/column policies separately in BigQuery authorized views and again in the Spark job's code", correct: false },
+      { text: "Move the data into native BigQuery storage, since external tables cannot be secured at all", correct: false },
+      { text: "Rely on IAM permissions at the Cloud Storage bucket level only", correct: false }
+    ],
+    explanation: "BigLake tables provide a unified table abstraction over Cloud Storage data with row-level and column-level security enforced consistently regardless of which BigLake-integrated engine (BigQuery, Spark, etc.) queries it — solving the cross-engine consistent-policy requirement without duplicating rules. Defining the policy twice (once per engine) risks drift; external tables can be secured via BigLake rather than requiring a costly move to native storage; bucket-level IAM cannot express row/column-level policy.",
+    bestPractice: "Use BigLake whenever multiple compute engines need consistent, centrally-defined fine-grained access control over the same object-storage-backed data.",
+    references: ["bq-omni-analytics-hub", "dataplex-governance"]
+  },
+  {
+    id: 39,
+    question: "A PostgreSQL order-management system handles heavy OLTP traffic all day. The finance team also runs ad hoc multi-table analytical rollups against the same live database, and these queries increasingly slow down order processing. The team wants to stay PostgreSQL-compatible without building a separate warehouse pipeline just for this need.",
+    topic: "AlloyDB",
+    difficulty: "hard",
+    options: [
+      { text: "Migrate to AlloyDB for PostgreSQL, whose built-in columnar engine accelerates analytical queries in the background with minimal impact on concurrent OLTP transactions", correct: true },
+      { text: "Migrate to Cloud SQL for PostgreSQL with a larger machine type", correct: false },
+      { text: "Replicate to BigQuery nightly and run finance queries there instead", correct: false },
+      { text: "Add more Cloud SQL read replicas and route analytical queries to a replica", correct: false }
+    ],
+    explanation: "AlloyDB is PostgreSQL-wire-compatible but adds an in-memory columnar engine that automatically accelerates analytical/aggregation queries against the same transactional data (true HTAP), directly addressing OLTP/OLAP contention with minimal impact on operational queries. Cloud SQL's engine behaves close to stock PostgreSQL and has no such built-in accelerator, so a bigger machine only delays the same contention; a nightly BigQuery replica reintroduces the separate-warehouse-pipeline the team wants to avoid and adds a day of staleness; a same-engine read replica still scans rows the same inefficient way for aggregation-heavy queries, just isolated from the primary.",
+    bestPractice: "Choose AlloyDB over Cloud SQL specifically when a workload mixes heavy OLTP with real-time analytical queries against the same data (HTAP); use Cloud SQL for straightforward OLTP-only or cost-sensitive general-purpose needs.",
+    references: ["alloydb-cloudsql-comparison", "transactional-db"]
+  },
+  {
+    id: 40,
+    question: "A read-heavy product catalog API backed by Cloud SQL sees repeated identical queries for the same top-selling items, spiking database CPU during traffic surges. Reads must return in single-digit milliseconds and can tolerate a few seconds of staleness.",
+    topic: "Memorystore",
+    difficulty: "medium",
+    options: [
+      { text: "Add a Memorystore (Redis) cache in front of Cloud SQL for the hot read paths, serving repeated lookups from memory instead of hitting the database each time", correct: true },
+      { text: "Scale Cloud SQL vertically to a larger machine type", correct: false },
+      { text: "Migrate the catalog to Bigtable for lower read latency", correct: false },
+      { text: "Add more Cloud SQL read replicas", correct: false }
+    ],
+    explanation: "Memorystore for Redis is designed exactly for this: an in-memory cache layer absorbing repeated reads for hot keys at sub-millisecond latency and reducing load on the source database, appropriate when slight staleness is acceptable. Scaling the database vertically only delays the same redundant-read problem at higher cost; migrating to Bigtable is an unnecessary rewrite when the real issue is caching a hot pattern, not choosing a different primary database; more read replicas still re-execute the same repeated queries on every request.",
+    bestPractice: "Reach for Memorystore when the access pattern is 'the same hot keys read repeatedly' and slight staleness is tolerable, rather than scaling or replacing the underlying database.",
+    references: ["transactional-db", "service-selection"]
+  },
+  {
+    id: 41,
+    question: "An operational MySQL database backs a live application. Analytics needs BigQuery tables reflecting inserts, updates, and deletes within a couple of minutes, without adding recurring query load to the production database beyond a one-time initial snapshot, and without hand-building a polling mechanism.",
+    topic: "Datastream",
+    difficulty: "hard",
+    options: [
+      { text: "Datastream, using log-based change data capture (reading the MySQL binlog) to stream inserts/updates/deletes into BigQuery near-real-time after an initial backfill", correct: true },
+      { text: "A nightly Storage Transfer Service export of full table dumps", correct: false },
+      { text: "A Cloud Function polling the table every minute with SELECT * and diffing results in application code", correct: false },
+      { text: "BigQuery Data Transfer Service scheduled to query MySQL hourly", correct: false }
+    ],
+    explanation: "Datastream performs log-based CDC, reading the database's replication log rather than issuing repeated queries, capturing every change (including deletes) with minimal source load and streaming it to BigQuery with low latency after an initial backfill snapshot. A nightly full export is far too coarse and high-latency; polling with SELECT * and diffing reinvents CDC poorly, cannot reliably capture deletes, and adds the recurring query load explicitly ruled out; BigQuery Data Transfer Service does not support arbitrary live MySQL as a source and hourly polling wouldn't meet the freshness bar regardless.",
+    bestPractice: "Use Datastream for near-real-time replication from operational databases whenever change-level fidelity (including deletes) is needed without adding recurring polling load to the source.",
+    references: ["datastream-cdc", "warehouse-design"]
+  },
+  {
+    id: 42,
+    question: "A one-time migration of 300 TB from an on-prem NAS to Cloud Storage must complete in under 2 weeks, but the only available sustained bandwidth is 50 Mbps (6.25 MB/s) with no near-term upgrade possible.",
+    topic: "Data Ingestion",
+    difficulty: "medium",
+    options: [
+      { text: "Order a Transfer Appliance: ship physical storage hardware, load the 300 TB locally, and ship it back for Google to ingest into Cloud Storage", correct: true },
+      { text: "Use Storage Transfer Service over the existing 50 Mbps link", correct: false },
+      { text: "Compress the data 10:1 and transfer the reduced volume over the same link", correct: false },
+      { text: "Request a Pub/Sub quota increase to speed up the transfer", correct: false }
+    ],
+    explanation: "At 6.25 MB/s, 300 TB (300,000,000 MB) takes roughly 48,000,000 seconds — about 555 days, well over a year — nowhere close to two weeks; even an optimistic 10:1 compression (30 TB) still needs about 55 days over the same link, still far short of the deadline, and typical mixed NAS data rarely compresses that well. Physical shipment via Transfer Appliance, despite its own shipping/handling lead time (roughly a week each way), is the only realistic option given the bandwidth constraint. Pub/Sub is unrelated to bulk file transfer.",
+    bestPractice: "Whenever available bandwidth × deadline can't mathematically cover the data volume, treat that as a hard constraint ruling out network transfer, and default to physical Transfer Appliance for large one-time migrations on constrained links.",
+    references: ["data-transfer-cost", "dts-overview"]
+  },
+  {
+    id: 43,
+    question: "An analytics team with SQL-only skills (no Python/ML engineering) wants to train and evaluate a churn-prediction logistic regression model directly against a 2 TB BigQuery table, iterating quickly without exporting data or standing up separate training infrastructure.",
+    topic: "BigQuery ML",
+    difficulty: "medium",
+    options: [
+      { text: "BigQuery ML: CREATE MODEL with model_type='logistic_reg', then ML.EVALUATE and ML.PREDICT, training and scoring entirely in SQL against the table in place", correct: true },
+      { text: "Export the table to Cloud Storage, then use Vertex AI AutoML Tables", correct: false },
+      { text: "Use Vertex AI custom training with a hand-written scikit-learn script", correct: false },
+      { text: "Use Dataflow to implement gradient descent manually", correct: false }
+    ],
+    explanation: "BigQuery ML lets SQL-proficient analysts train, evaluate, and generate predictions directly on BigQuery data using familiar SQL (CREATE MODEL, ML.EVALUATE, ML.PREDICT), with no data export and no separate ML infrastructure — a direct fit for a SQL-only team iterating on tabular data already in BigQuery. Exporting to Cloud Storage for AutoML adds a step the team wants to avoid; custom training requires Python/ML engineering skills the team lacks; hand-rolling gradient descent in Dataflow reinvents a managed, SQL-native capability.",
+    bestPractice: "Reach for BigQuery ML when the team's skillset is SQL, the data already lives in BigQuery, and the supported model types (regression, classification, clustering, time-series, or imported models) fit the need; move to Vertex AI custom training when architecture control or unsupported model types are required.",
+    references: ["bigquery-ml", "vertex-ai-training-deployment"]
+  },
+  {
+    id: 44,
+    question: "A data science team's model training today is a set of manually-run notebook cells (preprocess, train, evaluate, conditionally register). Retraining is ad hoc and hard to reproduce or audit. They want every retraining run to be a versioned, repeatable workflow with step-to-step lineage.",
+    topic: "Vertex AI",
+    difficulty: "medium",
+    options: [
+      { text: "Vertex AI Pipelines: define preprocess/train/evaluate/register as a pipeline DAG, with each run automatically versioned and its artifacts/lineage tracked", correct: true },
+      { text: "Convert the notebook into a single Cloud Function that runs top-to-bottom", correct: false },
+      { text: "Schedule the notebook via Cloud Scheduler to re-run nightly", correct: false },
+      { text: "Run the whole notebook as a single PythonOperator task in Cloud Composer", correct: false }
+    ],
+    explanation: "Vertex AI Pipelines expresses an ML workflow as a DAG of discrete, containerized steps, automatically versioning each run and tracking artifacts/metadata (datasets, models, metrics) via Vertex ML Metadata for lineage and reproducibility — turning ad hoc notebook runs into an auditable, repeatable process. A single Cloud Function or a nightly-scheduled notebook is still an opaque, undifferentiated script with no per-step artifact tracking; a Composer PythonOperator wrapping the whole notebook orchestrates timing but provides no ML-specific lineage or versioning.",
+    bestPractice: "Move from manual notebook execution to Vertex AI Pipelines once retraining needs to be reproducible, auditable, or conditionally branching (e.g., only register a model if evaluation metrics pass a threshold).",
+    references: ["vertex-ai-pipelines-registry", "vertex-ai-training-deployment"]
+  },
+  {
+    id: 45,
+    question: "Multiple teams retrain the same fraud model weekly, producing new model artifacts each time. There's no clear way to know which version currently serves production, roll back quickly if a new version regresses, or compare evaluation metrics across versions.",
+    topic: "Vertex AI",
+    difficulty: "medium",
+    options: [
+      { text: "Vertex AI Model Registry: register each trained model as a new version under one logical model resource, with metadata/metrics attached and clear control over which version serves", correct: true },
+      { text: "Store each model file with a timestamped Cloud Storage filename and track versions in a spreadsheet", correct: false },
+      { text: "Deploy every new model to a brand-new, separate Vertex AI endpoint each week", correct: false },
+      { text: "Rely on Cloud Audit Logs to reconstruct which model version was deployed when", correct: false }
+    ],
+    explanation: "Model Registry gives each logical model a version history: every training run's output can be registered as a new version with metadata and evaluation metrics attached, letting you designate a default serving version or roll back to a prior one directly. A spreadsheet-and-filename scheme is exactly the ad hoc, error-prone tracking being replaced; a new endpoint per week fragments serving infrastructure instead of solving version tracking; audit logs show access/config-change events, not model version metadata or lineage.",
+    bestPractice: "Register every trained model version in Vertex AI Model Registry as part of the training pipeline itself, not as an afterthought, so rollback and version comparison are always available.",
+    references: ["vertex-ai-pipelines-registry", "vertex-ai-training-deployment"]
+  },
+  {
+    id: 46,
+    question: "A deployed fraud-detection model's accuracy has degraded over the past month with no code or infrastructure changes. The team suspects the real-world input feature distribution has shifted since training, but has no automated way to detect this before customer complaints surface.",
+    topic: "Vertex AI",
+    difficulty: "hard",
+    options: [
+      { text: "Enable Vertex AI Model Monitoring on the endpoint to detect training-serving skew and prediction drift by comparing production input feature distributions against the training baseline, alerting when a configured threshold is exceeded", correct: true },
+      { text: "Add more logging statements to the serving container and manually review logs weekly", correct: false },
+      { text: "Retrain the model every night regardless of whether drift has occurred", correct: false },
+      { text: "Rely on Cloud Monitoring CPU and latency metrics on the endpoint", correct: false }
+    ],
+    explanation: "Vertex AI Model Monitoring computes statistical distance between production request feature distributions (or feature attributions) and either the training baseline (skew) or an earlier production window (drift), alerting when a feature crosses a configured threshold — proactive, automated detection instead of manual log review, a blind fixed retraining cadence, or infrastructure metrics that don't reflect statistical changes in inputs or predictions.",
+    bestPractice: "Enable Model Monitoring on production endpoints for models where input distributions can realistically shift over time, and use its drift/skew alerts to trigger retraining rather than retraining on a fixed schedule regardless of need.",
+    references: ["vertex-ai-model-monitoring", "vertex-ai-feature-store"]
+  },
+  {
+    id: 47,
+    question: "A support-ticket search feature must let agents find similar past tickets by semantic meaning (not just keyword match) across 5 million unstructured ticket records, grounding an LLM's answer with the most relevant prior tickets (RAG). What's the recommended approach for preparing and serving this data?",
+    topic: "Vertex AI",
+    difficulty: "hard",
+    options: [
+      { text: "Generate vector embeddings for each ticket with a Vertex AI embedding model, index them in Vertex AI Vector Search, and retrieve nearest-neighbor matches at query time to ground the LLM prompt", correct: true },
+      { text: "Store raw ticket text in BigQuery and filter with SQL LIKE '%keyword%'", correct: false },
+      { text: "Fine-tune the LLM on all 5 million tickets instead of retrieving relevant ones at query time", correct: false },
+      { text: "Use Cloud DLP to cluster tickets by similarity", correct: false }
+    ],
+    explanation: "RAG over unstructured text requires converting text into vector embeddings that capture semantic meaning, then using a vector similarity index to retrieve the most relevant documents per query at inference time. Vertex AI provides embedding models to generate these vectors and Vector Search to index and query them at low latency, feeding retrieved results into the LLM prompt as grounding context. Keyword filtering misses semantically similar but differently-worded tickets; fine-tuning on all tickets doesn't let you cite specific retrievable sources per query and is expensive to keep current; DLP detects/de-identifies sensitive data, not semantic similarity.",
+    bestPractice: "For RAG over unstructured text, embed once and incrementally re-embed as new documents arrive, keeping retrieval (Vector Search) separate from generation (the LLM call) so grounding sources stay current without retraining the model.",
+    references: ["vertex-ai-embeddings-rag", "vertex-ai-feature-store"]
+  },
+  {
+    id: 48,
+    question: "A Spanner schema has Customers and Orders tables (each customer has many orders). The dominant query is 'fetch a customer and all their orders' in one request; independent cross-customer order queries are rare. Orders currently references customers via a plain column, and this common lookup crosses splits, adding latency.",
+    topic: "Spanner",
+    difficulty: "hard",
+    options: [
+      { text: "Declare Orders as an interleaved child table of Customers, with customer_id leading Orders' primary key, so Spanner physically co-locates each customer's orders with that customer's row", correct: true },
+      { text: "Add a secondary index on Orders.customer_id instead of interleaving", correct: false },
+      { text: "Denormalize by storing all order data as a repeated field inside the Customers row", correct: false },
+      { text: "Manually shard Orders into multiple tables by customer_id range", correct: false }
+    ],
+    explanation: "Interleaving physically co-locates parent and child rows (a customer and their orders) in the same split, so fetching a customer with all their orders reads contiguous data instead of a cross-split join — directly matching this access pattern; it requires the child's primary key to be prefixed with the parent's key. A secondary index reduces some lookup cost but doesn't co-locate storage the way interleaving does; Spanner is relational with bounded row sizes and transactional child-row semantics, unlike BigQuery's nested/repeated field model, so cramming orders into the customer row defeats independent order updates; manual sharding reinvents what interleaving already provides automatically.",
+    bestPractice: "Interleave child tables when the dominant access pattern reads a parent with its children together; keep tables separate (with a secondary index) when children are frequently queried independently of their parent.",
+    references: ["spanner-schema-design", "spanner-architecture"]
+  },
+  {
+    id: 49,
+    question: "A Spanner table logs events with a primary key of a monotonically increasing INT64 event_id. Under high write load, monitoring shows latency spikes concentrated in one narrow key range, despite the instance having many nodes.",
+    topic: "Spanner",
+    difficulty: "hard",
+    options: [
+      { text: "Replace the primary key with a UUID or a bit-reversed sequential value, so consecutive writes no longer land in the same narrow, ever-increasing key range", correct: true },
+      { text: "Add more nodes to the Spanner instance", correct: false },
+      { text: "Switch the column type from INT64 to STRING while keeping the same increasing numeric value", correct: false },
+      { text: "Add a secondary index on event_id", correct: false }
+    ],
+    explanation: "Like Bigtable, Spanner shards data by primary key range (splits), so a monotonically increasing primary key concentrates all new writes into the single newest, narrow key range regardless of total node count. A UUID (random distribution) or a bit-reversed sequence breaks the monotonic ordering so writes spread across the keyspace and, therefore, across splits. Adding nodes doesn't redistribute load away from one hot range; changing the column's storage type without changing the value's ordering behavior doesn't fix anything; an index on the same monotonic column doesn't affect write-side placement, which is governed by the primary key.",
+    bestPractice: "Avoid monotonically increasing primary keys in Spanner just as in Bigtable; use UUIDs, bit-reversal, or a well-distributed natural key for high-write-throughput tables.",
+    references: ["spanner-schema-design", "bigtable-rowkey-design"]
+  },
+  {
+    id: 50,
+    question: "A Looker Studio dashboard runs the same handful of aggregation queries against a 200 GB BigQuery table repeatedly as different users open it throughout the day, with a few seconds of lag per load. The underlying data updates only once per day.",
+    topic: "BigQuery",
+    difficulty: "medium",
+    options: [
+      { text: "Enable BI Engine on the relevant dataset/reservation, caching an in-memory copy of frequently-queried data to accelerate the dashboard's supported SQL for sub-second response", correct: true },
+      { text: "Increase the BigQuery slot reservation size", correct: false },
+      { text: "Partition the table by a random hash column", correct: false },
+      { text: "Export the table to Cloud Storage and have Looker Studio read the export directly", correct: false }
+    ],
+    explanation: "BI Engine is an in-memory analysis layer purpose-built to accelerate exactly this pattern: dashboards issuing the same or similar aggregation queries repeatedly against data that doesn't change every second, caching the relevant working set in memory for sub-second response without changing the dashboard's SQL. More slots speed up heavy ad hoc queries generally but don't specifically target this repeated-query caching opportunity; random-hash partitioning doesn't align with the dashboard's actual filters and provides no caching benefit; exporting to Cloud Storage loses live querying and adds a stale step for data that already updates only daily.",
+    bestPractice: "Enable BI Engine, sized to the actual dashboard working set, for BI workloads with repeated query patterns over slowly-changing data, rather than defaulting to buying more slot capacity.",
+    references: ["bi-engine-materialized-views", "bq-slots-commitment"]
+  },
+  {
+    id: 51,
+    question: "A dashboard needs a 'revenue by region by day' chart. The underlying orders table is 10 TB, and the dashboard query re-aggregates the relevant partitions from scratch every time any user opens it, even though the daily-region rollup itself is tiny and changes only with new incoming data.",
+    topic: "BigQuery",
+    difficulty: "medium",
+    options: [
+      { text: "Create a materialized view that precomputes the revenue-by-region-by-day aggregation, incrementally maintained as new data arrives, and point the dashboard at it instead of the raw table", correct: true },
+      { text: "Have the dashboard tool cache the query result in the browser for 24 hours", correct: false },
+      { text: "Convert the aggregation into a standard (non-materialized) view with the same SQL", correct: false },
+      { text: "Add every possible dashboard filter column to the table's clustering keys", correct: false }
+    ],
+    explanation: "A materialized view precomputes and incrementally maintains a query result, so dashboard queries against it read a tiny, pre-aggregated table instead of re-scanning and re-aggregating 10 TB on every load — directly matching the 'precalculating fields' guidance for BI-facing BigQuery data. Browser caching only helps the same session and can silently serve stale data past expiry without warehouse awareness; a standard view is expanded and re-executed against the base table on every query, providing no precomputation benefit; clustering reduces bytes scanned but doesn't eliminate repeatedly recomputing the same aggregation from scratch.",
+    bestPractice: "Materialize expensive, frequently-repeated aggregations that feed dashboards, and query the materialized view (or rely on BigQuery's automatic query rewriting) instead of the raw fact table.",
+    references: ["bq-query-optimization", "bi-engine-materialized-views"]
+  },
+  {
+    id: 52,
+    question: "A company must keep EU customer data physically stored and queried only within EU boundaries for regulatory reasons. A junior engineer proposes one BigQuery dataset in the US multi-region location containing both EU and US customer tables, relying on IAM to restrict which team can query which tables.",
+    topic: "Security",
+    difficulty: "hard",
+    options: [
+      { text: "Reject the plan; create a separate EU-location BigQuery dataset for EU customer data (keeping US data in its own US-location dataset), since dataset location is a physical boundary IAM cannot substitute for", correct: true },
+      { text: "Accept the plan, since IAM roles are sufficient to enforce data residency requirements regardless of physical dataset location", correct: false },
+      { text: "Accept the plan, but add VPC Service Controls around the project", correct: false },
+      { text: "Accept the plan, but encrypt the EU tables with a separate CMEK key", correct: false }
+    ],
+    explanation: "BigQuery dataset location determines the physical region where data is stored and where query processing occurs — a hard boundary. Regulatory data-residency/sovereignty requirements must be satisfied at this storage-location layer; no combination of IAM, VPC Service Controls, or CMEK changes where the bytes physically live. Those controls address different risks (who can access data, network/API exfiltration paths, and key custody, respectively) but not physical residency.",
+    bestPractice: "Treat dataset/bucket location choice as the primary lever for data residency and regional compliance requirements, designing project/dataset architecture (one dataset per required region) around it from the start rather than retrofitting it with access controls.",
+    references: ["data-residency-org-policy", "security-dlp-vpcsc"]
+  },
+  {
+    id: 53,
+    question: "A platform team wants to prevent any engineer, in any project across the organization, from ever creating a BigQuery dataset or Cloud Storage bucket in a non-approved region, enforced centrally so no project can opt out through misconfiguration.",
+    topic: "Security",
+    difficulty: "medium",
+    options: [
+      { text: "Set an organization policy constraint (e.g., resource locations) at the organization or folder level, enforced at resource-creation time and not overridable by individual project IAM permissions", correct: true },
+      { text: "Send a company-wide email asking teams to only select approved regions", correct: false },
+      { text: "Grant BigQuery Data Editor only to a central team who creates all datasets manually", correct: false },
+      { text: "Enable Cloud Audit Logs and review new datasets weekly for policy violations", correct: false }
+    ],
+    explanation: "Organization policies are the mechanism for centrally enforced, org-wide guardrails on resource configuration (like allowed locations), applied automatically at creation time across every project in scope regardless of individual IAM grants — exactly the 'can't opt out by mistake' requirement. An email relies on manual compliance; centralizing dataset creation through one team is an operational bottleneck that doesn't technically constrain what region is selectable, and doesn't scale; audit log review is detective and after-the-fact, not preventive.",
+    bestPractice: "Use organization policy constraints for guardrails that must be impossible to bypass by misconfiguration (allowed regions, disabling external IPs, restricting service account key creation), reserving IAM for who is allowed to perform otherwise-permitted actions.",
+    references: ["data-residency-org-policy", "iam-least-privilege"]
+  },
+  {
+    id: 54,
+    question: "A Dataflow pipeline runs on VMs with no external IP addresses (for security reasons) inside a VPC, but needs to reach BigQuery, Cloud Storage, and Pub/Sub APIs. The workers currently fail to reach these Google APIs.",
+    topic: "Networking",
+    difficulty: "medium",
+    options: [
+      { text: "Enable Private Google Access on the subnet, letting VMs without external IPs reach Google APIs over Google's internal network path", correct: true },
+      { text: "Assign external IPs to every Dataflow worker", correct: false },
+      { text: "Set up a NAT gateway to a third-party proxy outside Google Cloud", correct: false },
+      { text: "Use VPC Service Controls instead of Private Google Access", correct: false }
+    ],
+    explanation: "Private Google Access lets instances with only internal IP addresses reach Google APIs and services over Google's network rather than the public internet — exactly the connectivity gap for internal-IP-only Dataflow workers needing BigQuery, Cloud Storage, or Pub/Sub. Assigning external IPs reintroduces the public-internet exposure the security requirement was avoiding; a third-party NAT proxy is unnecessary and adds latency/cost for traffic that should stay within Google's network; VPC Service Controls restricts which perimeter data can move within/out of, but doesn't itself provide the network path for private-IP-only VMs to reach Google APIs.",
+    bestPractice: "Enable Private Google Access on any subnet hosting internal-IP-only compute (Dataflow, Dataproc, GCE) that needs to call Google APIs, instead of assigning external IPs purely to restore connectivity.",
+    references: ["networking-private-connectivity", "security-dlp-vpcsc"]
+  },
+  {
+    id: 55,
+    question: "A team manually edits Airflow DAG files directly in the production Cloud Composer environment's bucket and manually runs deployment commands from a laptop for Dataflow changes. Changes occasionally break production with no review step and no easy way to know what changed or roll back.",
+    topic: "Cloud Composer",
+    difficulty: "medium",
+    options: [
+      { text: "Set up a CI/CD pipeline (e.g., Cloud Build triggered on a git push) that tests changes, then deploys DAG files to Composer's bucket and packages/deploys the Dataflow template, so every change goes through version control, review, and repeatable automated deployment", correct: true },
+      { text: "Ask the team to email each other before making changes", correct: false },
+      { text: "Give every engineer direct write access to the production Composer bucket to move faster", correct: false },
+      { text: "Disable DAG changes entirely and freeze the current pipeline", correct: false }
+    ],
+    explanation: "The described problem is a process gap, not a tooling capability gap: DAGs and Dataflow templates are just files/artifacts, so putting them in version control and deploying via automated CI/CD (build, test, deploy) provides review, testability, versioned history, and rollback — directly addressing 'no review, no visibility into changes, can't roll back.' Emailing is manual and unscalable; broader direct write access removes review rather than adding it; freezing changes blocks legitimate iteration instead of making change safe.",
+    bestPractice: "Treat Composer DAGs and Dataflow pipeline code like any other production code: version-controlled, tested, and deployed only through CI/CD, never by hand-editing files in the production environment.",
+    references: ["composer-orchestration", "pipeline-cicd"]
+  },
+  {
+    id: 56,
+    question: "An analytics team has the BigQuery Admin predefined role at the project level so they can query and manage their own datasets — but this also lets them delete other teams' datasets and modify project-level IAM policy, well beyond what they need.",
+    topic: "Security",
+    difficulty: "medium",
+    options: [
+      { text: "Grant a narrower role (e.g., BigQuery Data Editor/Viewer plus BigQuery Job User) scoped to the datasets the team owns, or a custom role limited to permissions actually used, instead of project-level Admin", correct: true },
+      { text: "Keep BigQuery Admin, but add a documentation note not to touch other datasets", correct: false },
+      { text: "Remove all IAM roles and require per-query admin approval each time", correct: false },
+      { text: "Grant Owner at the project level instead, since it includes BigQuery Admin permissions plus more", correct: false }
+    ],
+    explanation: "Least privilege calls for granting the narrowest role/permission set that still lets a team do its actual job, rather than a broad predefined role that happens to include unrelated, unneeded permissions. A documentation note relies on trust instead of technically restricting what's possible; removing all roles in favor of per-query approval overcorrects into an operational bottleneck; granting Owner is strictly broader than the already-excessive current role.",
+    bestPractice: "Prefer narrowly-scoped predefined roles at the dataset level, or custom roles built from only the permissions actually used (checked via IAM Recommender), over broad project-level admin roles.",
+    references: ["iam-least-privilege", "security-dlp-vpcsc"]
+  },
+  {
+    id: 57,
+    question: "A company's streaming pipeline (Pub/Sub to Dataflow to BigQuery) runs in a single region. Leadership now requires it to keep functioning, with only a brief interruption, if that entire region becomes unavailable, and wants a concrete design rather than assuming the region won't fail.",
+    topic: "Reliability",
+    difficulty: "hard",
+    options: [
+      { text: "Deploy the pipeline redundantly in a second region (a standby or active pipeline reading from a second-region-capable topic) writing to a BigQuery dataset in a multi-region location, with a documented and tested failover path", correct: true },
+      { text: "Rely on Google's SLA for the region and take no additional architectural steps", correct: false },
+      { text: "Increase the number of Dataflow workers in the single region", correct: false },
+      { text: "Take a nightly Cloud Storage backup of the BigQuery table", correct: false }
+    ],
+    explanation: "True regional fault tolerance requires an actual redundant deployment footprint — a second region capable of processing, plus a tested path to redirect traffic to it — because no amount of within-region scaling, SLA reliance, or periodic backup substitutes for having a second place the pipeline can run when the primary region is unavailable. An SLA is a compensation commitment, not an availability guarantee; more workers improve capacity within the region but do nothing if the whole region goes down; a nightly backup leaves up to a day of gap and doesn't keep the streaming pipeline itself running through an outage.",
+    bestPractice: "For genuine regional disaster recovery, design and test (not just document) a cross-region failover path for both the streaming compute layer and the storage layer, treating SLAs as compensation terms, not availability guarantees.",
+    references: ["disaster-recovery-multiregion", "dataflow-streaming"]
+  },
+  {
+    id: 58,
+    question: "A Cloud SQL for PostgreSQL instance runs as a single zonal instance with no standby. The team wants automatic failover if the primary's zone becomes unavailable, with minimal data loss, without managing replication manually.",
+    topic: "Reliability",
+    difficulty: "medium",
+    options: [
+      { text: "Configure Cloud SQL high availability (a regional instance with a synchronously-replicated standby in a different zone), which fails over automatically with minimal data loss", correct: true },
+      { text: "Add a read replica in the same zone as the primary", correct: false },
+      { text: "Take hourly Cloud Storage exports of the database", correct: false },
+      { text: "Rely on the application to retry connections until the zone recovers", correct: false }
+    ],
+    explanation: "Cloud SQL's HA configuration maintains a synchronous standby in a different zone and automatically fails over to it on primary failure with minimal data loss — exactly the requirement. A same-zone read replica doesn't survive a zonal outage and isn't automatically promoted the way an HA standby is; hourly exports allow up to an hour of data loss and require a manual restore, not automatic failover; retrying connections provides no failover at all, only waiting for the original zone to recover.",
+    bestPractice: "Enable Cloud SQL HA (regional) for any production database where zonal failure must not cause extended downtime, treating read replicas and backups as complementary (read scaling, point-in-time recovery) rather than substitutes for HA.",
+    references: ["disaster-recovery-multiregion", "transactional-db"]
+  },
+  {
+    id: 59,
+    question: "A 500-slot BigQuery reservation serves both interactive analyst queries (expected in seconds) and large nightly batch ETL jobs (can run for hours). Analyst queries now queue behind batch jobs during business hours.",
+    topic: "BigQuery",
+    difficulty: "medium",
+    options: [
+      { text: "Create separate reservations for interactive and batch workloads so batch jobs can't consume all slots and starve interactive queries, optionally allowing batch to borrow idle interactive capacity when analysts aren't active", correct: true },
+      { text: "Set every job, including analyst queries, to BATCH priority", correct: false },
+      { text: "Increase the total slot count without separating workloads", correct: false },
+      { text: "Ask analysts to only run queries after nightly batch jobs finish", correct: false }
+    ],
+    explanation: "BigQuery reservations let you assign separate slot pools to different workloads, preventing one from starving another, with the option to configure how idle capacity from one reservation is shared with others — directly solving 'batch jobs are blocking analysts' through capacity management. Setting analyst queries to BATCH priority worsens their experience by deprioritizing them too; adding more slots to one shared, unpartitioned pool masks rather than fixes the isolation problem and costs more than necessary; asking analysts to change their schedule is a process workaround instead of using BigQuery's own capacity-management features.",
+    bestPractice: "Separate interactive and batch workloads into distinct reservations sized to their SLAs, and use idle-slot sharing to avoid over-provisioning for peak-only usage.",
+    references: ["bq-reservations-workload-mgmt", "bq-slots-commitment"]
+  },
+  {
+    id: 60,
+    question: "A previously-working nightly BigQuery load job starts failing with a quota-exceeded error. The team doesn't know whether it's a per-project daily load job quota, a table-update quota, a billing issue, or something else, and needs a fast, systematic way to find the exact cause.",
+    topic: "Monitoring",
+    difficulty: "medium",
+    options: [
+      { text: "Read the specific error message/code returned by the failed job, which names the exact quota or limit hit, and cross-check the project's Quotas page, rather than guessing which of several possible quotas is responsible", correct: true },
+      { text: "Immediately file a general quota increase request for all BigQuery quotas without reading the error", correct: false },
+      { text: "Assume it's a billing account suspension and update the payment method", correct: false },
+      { text: "Delete and recreate the destination table", correct: false }
+    ],
+    explanation: "BigQuery returns a specific, named error/reason for quota failures (for example, a distinct message for exceeding table update operations per day versus per-project load job limits versus a billing-related suspension), and the Quotas page shows current usage against each named limit — reading the actual error first is what lets you request the right remediation instead of guessing across several plausible causes.",
+    bestPractice: "Always read the specific error code/message and check the Quotas page for the named limit before requesting increases or taking corrective action — different quotas have different causes and different fixes.",
+    references: ["bq-troubleshooting-quotas", "bq-cost-controls"]
+  },
+  {
+    id: 61,
+    question: "A Dataflow pipeline processes incoming product review text and needs to enrich each record with a sentiment score and extracted entities before loading into BigQuery, using a pre-trained model rather than building or training a custom NLP model in-house.",
+    topic: "Dataflow",
+    difficulty: "medium",
+    options: [
+      { text: "Add a transform in the Dataflow pipeline that calls a pre-trained model (e.g., via Vertex AI or the Cloud Natural Language API) per element or in micro-batches to enrich each record with sentiment/entities before writing to BigQuery", correct: true },
+      { text: "Export the review dataset to a spreadsheet and manually tag sentiment", correct: false },
+      { text: "Write the raw text to BigQuery first and revisit sentiment tagging manually later", correct: false },
+      { text: "Train a custom deep learning model from scratch inside the Dataflow worker at runtime", correct: false }
+    ],
+    explanation: "'AI data enrichment' as a Dataflow pattern means calling a machine learning model — often a pre-trained managed API, or a deployed custom endpoint — from within a pipeline transform to augment each record with derived fields as data flows through, rather than treating enrichment as a separate manual or deferred step. Manual spreadsheet tagging doesn't scale to pipeline volume; deferring enrichment to 'later' never integrates it into the pipeline; training a model from scratch inside a worker at runtime is wildly impractical when a pre-trained API already solves the task, and violates the stated constraint against building a custom model.",
+    bestPractice: "For enrichment needs matched by an existing pre-trained API (sentiment, entity extraction, translation, vision), call it from a pipeline transform rather than building custom ML infrastructure; reserve custom training for needs a pre-trained API can't cover.",
+    references: ["dataflow-ai-enrichment", "dataflow-performance"]
+  },
+  {
+    id: 62,
+    question: "An analyst wants help translating a plain-English request into correct BigQuery SQL against an unfamiliar 40-table schema, and also wants suggestions for likely data-cleaning rules (e.g., inconsistent country-code formats), without treating whatever is generated as automatically correct.",
+    topic: "Data Preparation",
+    difficulty: "medium",
+    options: [
+      { text: "Use an LLM to draft the SQL query and propose candidate data-cleaning rules, then have the analyst review, validate against the actual schema/data, and test the output before relying on it", correct: true },
+      { text: "Have the LLM directly execute DML against production tables based on its own interpretation, with no review step", correct: false },
+      { text: "Refuse to use LLM assistance at all, since generated SQL can never be trusted", correct: false },
+      { text: "Use the LLM only to write documentation after the SQL is manually written, never to help draft the query itself", correct: false }
+    ],
+    explanation: "Prompting LLMs to help generate queries and suggest data-cleaning logic is a recognized productivity aid for data preparation, especially against unfamiliar or large schemas — but like any generated code, it requires human review and validation against the actual schema and data before being trusted, particularly before anything beyond read-only exploration. Letting it execute DML unreviewed risks silently corrupting or misreporting data against a schema it doesn't fully understand; refusing to use it at all discards a legitimate aid; restricting it to post-hoc documentation discards its usefulness for the query-drafting step itself.",
+    bestPractice: "Treat LLM-drafted SQL and cleaning rules as a first draft that speeds up exploration, always validated by the analyst against the real schema/data (ideally read-only or on a sandbox dataset first) before use in production reporting or DML.",
+    references: ["llm-query-generation-cleaning", "dataform-elt"]
   }
 ];
 
@@ -1031,16 +1481,17 @@ Storage Classes:
    - Data replicated across regions
    - Use case: High availability
 
-Cost Comparison (100 GB/year):
-- Standard: $2,400
-- Nearline: $1,200 (year 1: $200 storage + $1,000 retrieval if accessed monthly)
-- Coldline: $480 (year 1: $400 storage + $80 retrieval if accessed once)
-- Archive: $144 (year 1: $144 storage, no retrieval)
+Cost Comparison (100 GB, storage only, full year):
+- Standard: 100 GB × $0.020/GB/mo × 12 = $24/year
+- Nearline: 100 GB × $0.010/GB/mo × 12 = $12/year storage, plus $0.01/GB per retrieval each time it's read
+- Coldline: 100 GB × $0.004/GB/mo × 12 = $4.80/year storage, plus $0.02/GB per retrieval
+- Archive: 100 GB × $0.0012/GB/mo × 12 = $1.44/year storage, plus $0.05/GB per retrieval
+(Retrieval and minimum-storage-duration charges apply on top of these base storage costs — colder classes only win once access frequency is low enough that storage savings outweigh retrieval fees.)
 
 Selection Criteria:
 - Know your access patterns
 - Implement lifecycle policies for automatic tiering
-- Archive after 1 year for compliance (95% savings)`,
+- Archive vs. Standard storage rate alone is a ~94% per-GB saving ($0.0012 vs $0.020/GB/month); net savings depend on retrieval frequency`,
     keyPoints: [
       "Standard: Hot data, frequent access",
       "Nearline/Coldline: Tiering for warm/cold data",
@@ -1097,10 +1548,11 @@ Example Policy:
     }
   }
 
-Cost Savings Example (100 GB):
-- Manual (all Standard): $2,400/year
-- With lifecycle (Standard → Archive after 1 year): $1,944/year (18% savings)
-- Aggressive (Archive after 90 days): $432/year (82% savings)
+Cost Savings Example (100 GB, storage-only, steady state):
+- Manual (all Standard): $24/year
+- With moderate lifecycle (mostly Standard, tail moved to Archive): ~$19.68/year (18% savings)
+- Aggressive lifecycle (moved to Archive quickly): ~$4.32/year (82% savings)
+(Actual savings also depend on retrieval fees if the archived data is read back.)
 
 Best Practices:
 - Define clear lifecycle based on access patterns
@@ -1167,13 +1619,13 @@ Optimization Strategies:
 Cost Calculation Example:
   100 GB dataset, accessed for 3 months then archived 7 years
   
-  Manual (all Standard): 10 years × 12 months × 100 GB × $0.020 = $2,400
-  
+  Manual (all Standard): 10 years × 12 months × 100 GB × $0.020/GB/month = $240
+
   With Lifecycle:
   - Months 1-3: Standard = 3 × $2 = $6
   - Months 4-12: Nearline = 9 × $1 = $9
   - Years 2-10: Archive = 9 × 12 × $0.12 = $13
-  - Total: $28 (99% savings!)`,
+  - Total: $28 (~88% savings vs. the $240 all-Standard baseline)`,
     keyPoints: [
       "Lifecycle policies provide 80-95% savings for compliance",
       "Egress outside GCP costs $0.12/GB (keep data in cloud)",
@@ -1188,21 +1640,28 @@ Cost Calculation Example:
     category: "Pub/Sub",
     content: `Understanding and managing Pub/Sub quotas for high-throughput workloads.
 
-Default Quotas:
-1. Publishing: 10,000 messages/second per topic
-2. Pulling: 10,000 messages/second per subscription
-3. Message size: 10 MB per message
-4. Message retention: 7 days default
+Default Quotas (regional, throughput-based — NOT per-topic message counts):
+1. Publisher throughput: 200 MB/s (small regions) to 4 GB/s (large regions like us-central1), quota name pubsub.googleapis.com/regionalpublisher
+2. Subscriber pull throughput: 400 MB/s to 4 GB/s per region, quota name pubsub.googleapis.com/regionalsubscriber
+3. Subscriber push throughput: 40 MB/s to 440 MB/s per region
+4. Message size: 10 MB per message
+5. Message retention: 7 days default (up to 31 days configurable)
+
+There is no default hard limit like "1,000" or "10,000 messages/second per topic" — quotas are measured in bytes/minute across an entire region, shared by all topics and subscriptions in it. At typical message sizes (a few KB), you'd need tens of thousands of messages/sec sustained before approaching the default regional quota.
+
+The Real Bottleneck at Moderate Scale — Client Flow Control:
+- Client libraries cap outstanding (unacked) messages/bytes per subscriber via flow control settings (maxOutstandingMessages, maxOutstandingBytes)
+- If per-message processing is slow relative to these caps, the subscriber throttles itself well before any service-side quota is relevant
+- Symptom: growing "oldest unacked message age" metric while regional throughput quota utilization stays low
 
 Quota Increases:
-- Available via Google Cloud Console
-- Request based on business need
+- Available via Google Cloud Console (for the regional throughput quotas above)
+- Only relevant at genuinely massive scale (hundreds of MB/s to GB/s sustained)
 - Reviewed by Google team
-- Usually approved for legitimate use cases
 
 High-Throughput Configuration:
-- Topics: Can handle 100K+ msg/sec with quota increase
-- Subscriptions: Scale horizontally (add subscribers)
+- Topics: Can sustain very high throughput; the region, not the topic, is the quota boundary
+- Subscriptions: Scale horizontally (add subscribers) to increase parallel processing capacity
 - Batching: Batch subscribe() for 100-500 messages
 - Batch deadline: 100-500ms window
 
@@ -1240,10 +1699,10 @@ Performance Tuning:
       .setMaxBytes(100L * 1024 * 1024)  // 100 MB
       .build());`,
     keyPoints: [
-      "Default quota: 10K msg/sec per topic (scalable)",
-      "Increasing subscribers doesn't increase quota",
-      "Batching improves throughput by 10-50%",
-      "Request quota increases proactively for high volume"
+      "Quotas are regional and throughput-based (MB/s), not a fixed messages-per-second-per-topic limit",
+      "Default regional throughput quotas range from ~200 MB/s to 4 GB/s depending on region size",
+      "At moderate scale, client-side flow control (maxOutstandingMessages/Bytes) is a far more likely bottleneck than a service quota",
+      "Batching improves throughput by 10-50%; request quota increases only near genuinely massive (GB/s) scale"
     ],
     externalLink: "https://cloud.google.com/pubsub/quotas"
   },
@@ -1271,9 +1730,9 @@ Subscription Patterns:
    - Lower latency, needs active listener
 
 3. Exactly-Once Delivery
-   - Pub/Sub guarantees at-least-once by default
-   - Deduplication logic in subscriber for exactly-once
-   - Use message IDs to idempotently process
+   - Default delivery guarantee is at-least-once (duplicates possible)
+   - Pub/Sub also offers an opt-in "exactly-once delivery" setting per subscription, which prevents duplicate deliveries within Pub/Sub's own retry/ack handling for a given subscription
+   - This does not cover end-to-end exactly-once (e.g., a message reprocessed after a pipeline restart), so idempotent processing keyed on message ID is still the general best practice
 
 Ordering Guarantees:
 - Per-key ordering available (partition by key)
@@ -1287,9 +1746,9 @@ Monitoring & Alerting:
 - Error rate (failed push attempts)
 
 Cost Optimization:
-- Publish: $5 per 10M messages ($0.0000005/msg)
-- Pull: $10 per 10M messages ($0.000001/msg)
-- 100 publishers, 10 subscribers: ~$5,000/month at 100K msg/sec
+- Pub/Sub bills by data volume, not message count: $40 per TiB, with roughly the first 10 GiB/month free
+- Publish volume and each subscription's delivery (pull or push) volume are billed separately, so one topic with 3 subscriptions bills for 1× publish + 3× delivery volume — fan-out multiplies cost
+- Fewer, well-targeted subscriptions (rather than one per consumer team "just in case") directly reduces spend at high fan-out
 
 Example Configuration:
   Topic: user-events
@@ -1303,10 +1762,10 @@ Example Configuration:
   Subscribers: 50 (2000 msg/sec each)
   Ordering: By user_id (partition key)`,
     keyPoints: [
-      "Topic per logical stream; shard if >10K msg/sec",
+      "Topic per logical stream; shard only if approaching regional throughput quotas (hundreds of MB/s+), not at a fixed msg/sec number",
       "Pull subscriptions for high throughput",
       "Push subscriptions for low latency to endpoints",
-      "Exactly-once requires deduplication logic"
+      "Opt-in exactly-once delivery reduces duplicates from Pub/Sub itself, but idempotent processing is still recommended end-to-end"
     ],
     externalLink: "https://cloud.google.com/pubsub/docs/subscriber"
   },
@@ -1335,32 +1794,31 @@ Capacity Planning:
    - Configure capacity for peak, not average
 
 3. Subscriber Capacity
-   - Each subscription/subscriber: ~2000 msg/sec practical limit
-   - 100 subscribers: 100 × 2000 = 200K msg/sec capacity
-   - Scale by adding subscribers
+   - No fixed official per-subscriber msg/sec ceiling; practical throughput per streaming-pull client depends on message size, ack latency, and parallelism
+   - Scale by adding subscriber processes/threads and tuning flow control, not by assuming a fixed magic number per subscriber
 
-Cost Estimation:
-  1B messages/month = 100 msg/sec average
-  - Publish cost: (1B / 10M) × $5 = $500
-  - Pull cost: (1B / 10M) × $10 = $1,000
-  - Total: ~$1,500/month for 100 msg/sec
-  
-  100K msg/sec:
-  - 2.6B messages/month (2.6T messages/month)
-  - Publish: ~$1,300/month
-  - Pull: ~$2,600/month
-  - Total: ~$3,900/month (baseline)
+Cost Estimation (billed by volume: $40/TiB, publish + each subscription's delivery billed separately):
+  100 msg/sec average, 5 KB/message, 1 subscription
+  - Volume: 100 × 5 KB/sec × 2,592,000 sec/month ≈ 1.24 TiB/month
+  - Publish: 1.24 TiB × $40 ≈ $50/month
+  - Delivery (1 subscription): another ≈ $50/month
+  - Total: ~$100/month (before the small free-tier credit)
+
+  100K msg/sec average, 5 KB/message, 1 subscription
+  - Volume: ≈ 1,266 TiB/month
+  - Publish: ≈ $50,600/month
+  - Delivery (1 subscription): another ≈ $50,600/month
+  - Total: ~$101,000/month — and this multiplies further with each additional subscription reading the same topic
 
 Optimization:
-- Batch publishing (100-500 messages per request)
-- Batch pulling (100-500 messages per pull)
-- Reduces API calls 100-500× (proportional cost reduction)
-- Actually paying same total, but higher per-API efficiency`,
+- Batch publishing (100-500 messages per request) reduces API call overhead, not the billed data volume
+- Minimize the number of subscriptions on high-volume topics; each additional subscription re-bills the full delivery volume
+- Filter or reduce message size/redundant fields where possible, since cost scales with bytes, not message count`,
     keyPoints: [
       "Plan for peak rate, not average (usually 2-4× higher)",
-      "Each subscriber: ~2000 msg/sec practical limit",
-      "Costs: $0.0000005/publish, $0.000001/pull",
-      "Batching reduces API calls; total cost same, better efficiency"
+      "No fixed official msg/sec ceiling per subscriber; scale via more subscriber processes and flow-control tuning",
+      "Billed by data volume ($40/TiB), with publish and each subscription's delivery billed separately",
+      "Fan-out (multiple subscriptions on one topic) multiplies cost; batching improves API efficiency but not billed volume"
     ],
     externalLink: "https://cloud.google.com/pubsub/pricing"
   },
@@ -1373,7 +1831,7 @@ Optimization:
 What Are Preemptible VMs?
 - Temporary compute instances (up to 25 hours)
 - Can be terminated anytime (usually every 1-4 hours average)
-- Cost: $0.057/vcpu/hour vs. $0.19 for regular (~70% discount)
+- Cost: ~$0.057/hour vs. ~$0.19/hour for a regular n1-standard-4 VM (4 vCPU, whole-machine price, ~70% discount) — the discount is per machine, not per vCPU
 
 When to Use:
 - Batch jobs that can resume (HDFS checkpoints)
@@ -1416,7 +1874,7 @@ Limitations:
 - Not suitable for time-critical batch jobs
 - Monitor cost-benefit (sometimes faster = worth premium)`,
     keyPoints: [
-      "70% cost savings: $0.057 vs. $0.19 per vcpu/hour",
+      "~70% cost savings: ~$0.057 vs. ~$0.19 per n1-standard-4 VM/hour (whole machine, not per vCPU)",
       "Use only for fault-tolerant batch jobs",
       "Mix 50/50 regular + preemptible is typical",
       "Dataproc + Spark auto-retry handles interruptions"
@@ -1603,7 +2061,7 @@ Transaction Semantics:
 
 Cost-Benefit:
 - Pros: Global consistency, high availability, horizontal scaling
-- Cons: Expensive ($0.90/node/hour), minimum 3 nodes ($1,969/month)
+- Cons: Compute is billed per node/hour (~$0.90/node/hour), though the minimum purchasable capacity is only 100 processing units (0.1 node) — cost scales with what you provision, not a forced multi-node floor
 - Worth it for: Global transactional apps, >100K QPS, multi-region
 
 Comparison with Cloud SQL:
@@ -1629,25 +2087,24 @@ Spanner Basics:
 - Strong consistency across regions (TrueTime)
 - Horizontal partitioning (sharding by primary key)
 
-Node Scaling:
-- 1 node = ~7,000 QPS at <10ms latency
-- 10 nodes = ~70,000 QPS
-- 100 nodes = ~700,000 QPS
-- Scales linearly (new nodes added quickly)
+Node Scaling (official rule of thumb, single-row 1 KB reads/writes):
+- 1 node ≈ up to 10,000 QPS of reads, OR up to 2,000 QPS of writes
+- Read and write throughput each scale linearly with added nodes/processing units (e.g., 2 nodes ≈ up to 20,000 reads QPS)
+- Actual performance depends heavily on row size, query shape, and schema (hotspots); always load-test your own workload
 
 Configuration Options:
 
 1. Regional Configuration
-   - 3-node minimum (quorum for consensus)
-   - Data stays in one region
+   - Minimum compute capacity: 100 processing units (0.1 node); production workloads typically start at 1,000 PU (1 node) or more, since sub-1000 PU instances can see non-linear scaling
+   - Data stored and replicated across zones within one region (Spanner always uses multiple replicas internally for consensus — this is transparent and not a separate node purchase)
    - Cheaper than multi-region
-   - Cost: 3 nodes × $0.90/hr = $1,969/month
+   - Cost: ~$0.90/node/hour (e.g., 1 node ≈ $657/month before sustained-use or commitment discounts)
 
 2. Multi-Region Configuration
-   - 5-node minimum (for HA across regions)
-   - Automatic failover
+   - Same 100 PU minimum; Google places read-write and read-only replicas across the chosen regions automatically
+   - Automatic failover, with a leader region for read-write transactions and low-latency reads from nearby read-only replicas
    - Data replicated across regions
-   - Cost: 5 nodes × $0.90/hr = $3,285/month
+   - Cost scales with nodes/PUs provisioned, same per-node-hour rate as regional, typically provisioned higher for the added replica overhead
 
 3. Multi-Region + Read Replicas
    - Read-only copies in additional regions
@@ -1684,14 +2141,13 @@ Database Optimization:
    - Avoid sequential keys that create hotspots
 
 Cost Optimization:
-- Regional (3 nodes): $1,969/month minimum
-- Multi-region (5 nodes): $3,285/month minimum
-- Read-only replicas: +$0.90/node/hr
-- Only use if truly need global consistency + HA`,
+- Minimum instance size is 100 PU (0.1 node, a fraction of $0.90/hr), but right-size to actual QPS needs rather than defaulting to a large instance
+- Multi-region costs more per PU provisioned due to cross-region replica overhead, not because of an artificial 5-node floor
+- Only use multi-region if you truly need cross-region reads with low latency and automatic regional failover`,
     keyPoints: [
-      "Linear scaling: Each node = ~7K QPS",
-      "Regional (3 nodes minimum): $1,969/month",
-      "Multi-region (5 nodes): $3,285/month",
+      "Linear scaling: ~10,000 reads QPS or ~2,000 writes QPS per node (1 KB rows), scales linearly with nodes/PUs added",
+      "Minimum compute capacity is 100 processing units (0.1 node) — there is no fixed 3-node or 5-node purchase minimum",
+      "Compute cost is ~$0.90/node/hour regardless of regional vs. multi-region configuration",
       "Key design critical: Avoid sequential keys (create hotspots)"
     ],
     externalLink: "https://cloud.google.com/spanner/docs/instances"
@@ -1711,7 +2167,7 @@ Comparison Matrix:
 | Global | Regional + replicas | Native multi-region | Global |
 | Max QPS | 1-10K | 100K+ | 10K+ |
 | Multi-region Transactions | No (replication lag) | Yes (instant) | No |
-| Cost (entry) | $60-350/mo | $1,969/mo | Pay-per-operation |
+| Cost (entry) | $60-350/mo | ~$65/mo at 100 PU minimum, scales with nodes | Pay-per-operation |
 | Scaling | Vertical (larger instance) | Horizontal (add nodes) | Automatic |
 | SQL Support | Yes (MySQL/PostgreSQL) | Yes (SQL) | No (Datastore QL) |
 
@@ -1752,7 +2208,7 @@ Hybrid Approach:
 - Firestore: Mobile cache (push updates)`,
     keyPoints: [
       "Cloud SQL: Regional RDBMS (1-10K QPS, $60-350/mo)",
-      "Spanner: Global strong consistency (100K+ QPS, $1,969+/mo)",
+      "Spanner: Global strong consistency (100K+ QPS achievable by scaling nodes; billed ~$0.90/node/hr from a 100 PU/0.1-node minimum)",
       "Firestore: Flexible documents (auto-scale, real-time)",
       "Choose by consistency requirement and scale"
     ],
@@ -1904,23 +2360,27 @@ Scenario: IoT sensor data collection
   },
   {
     id: "dts-overview",
-    title: "Cloud Data Transfer Service Overview",
+    title: "Storage Transfer Service vs. BigQuery Data Transfer Service",
     category: "Data Ingestion",
-    content: `Using Data Transfer Service for scheduled data imports.
+    content: `Two distinct managed services cover "scheduled transfer into GCP," and the exam expects you to tell them apart.
 
-What Is DTS?
-- Managed service for scheduled bulk data transfers
-- Copies data from external sources into GCS/BigQuery
-- Supports: AWS S3, Azure Blob, on-prem (via partner connectors)
-- Frequency: One-time or recurring (hourly to monthly)
+Storage Transfer Service:
+- Moves objects between storage systems into (or between) Cloud Storage buckets
+- Sources: Amazon S3, Azure Blob Storage, on-prem/HDFS (via agent-based transfer), another GCS bucket
+- Destination is always Cloud Storage — it does not load BigQuery tables
+- Frequency: one-time or recurring (as often as hourly)
+- No Google-side transfer fee; you pay resulting GCS storage, and the source cloud may bill its own egress
 
-Supported Sources:
-1. AWS S3 → Google Cloud Storage
-2. Azure Blob → Google Cloud Storage
-3. On-prem (via partner) → Google Cloud Storage
-4. BigQuery public datasets
-5. Salesforce → BigQuery
-6. Google Analytics → BigQuery
+BigQuery Data Transfer Service:
+- Loads data on a recurring schedule directly into BigQuery tables
+- Sources: Google SaaS products (Google Ads, Campaign Manager, YouTube, Google Merchant Center), and select third-party/cloud sources including Amazon S3, Amazon Redshift, Teradata, and Salesforce (via partner connectors)
+- Destination is always a BigQuery dataset/table
+- Runs as a managed BigQuery load job — no separate Dataflow/compute needed for the transfer itself
+
+Choosing Between Them:
+- Need raw files staged in Cloud Storage (any format, any downstream use)? → Storage Transfer Service
+- Need recurring, scheduled loads straight into BigQuery tables from a supported SaaS or S3/Redshift source? → BigQuery Data Transfer Service
+- Need continuous low-latency change data capture from an operational database? → Datastream, not either transfer service
 
 Workflow:
 1. Configure transfer job
@@ -1941,12 +2401,12 @@ Workflow:
    - Partitioned by transfer date (optional)
 
 Cost:
-- Transfer itself: FREE (intra-GCP)
+- Transfer job itself: no Google-side transfer fee for either service
 - Storage (GCS): $0.02/GB/month (Standard)
 - Query (BigQuery): $6.25/TiB scanned
-- No data transfer charges for AWS/Azure to GCP
+- The source cloud (e.g., AWS) may still bill its own egress to move data out — that charge is independent of Google
 
-Example Configuration (AWS S3 → BigQuery):
+Example Configuration (BigQuery Data Transfer Service, Amazon S3 → BigQuery):
   Source: s3://my-bucket/data/sales/*.csv
   Destination: projects/my-project/datasets/raw/table_sales
   Schedule: Daily at 2 AM
@@ -1954,26 +2414,26 @@ Example Configuration (AWS S3 → BigQuery):
   Partition: By load date (_TABLE_SUFFIX)
 
 Best Practices:
-- Use transfer for recurring, scheduled imports
-- Not suitable for real-time (use Pub/Sub/Dataflow)
+- Use these transfer services for recurring, scheduled imports
+- Not suitable for real-time (use Pub/Sub/Dataflow, or Datastream for CDC)
 - Implement idempotency (same file imported twice = no duplicates)
 - Monitor transfer job history (failures, duration)
 - Archive source files after successful transfer
 
 Limitations:
 - Not real-time (scheduled batches only)
-- No transformation (copy as-is, use Dataflow to transform)
+- No transformation (copy as-is; use Dataflow or Dataform if transformation is needed)
 - Rate limits apply (but very high for typical workloads)
 
 Comparison:
-- DTS: Simple, scheduled, no code, FREE transfer
+- Storage Transfer Service / BigQuery Data Transfer Service: Simple, scheduled, no code, no Google-side transfer fee
 - Dataflow: Complex ETL, real-time, transformations
-- Cloud Functions: Real-time events, small files
+- Datastream: Continuous CDC from operational databases
 - gsutil: Manual/scripted copies`,
     keyPoints: [
-      "Data transfer itself is FREE (only pay storage/query)",
+      "Neither transfer service charges a Google-side transfer fee (only pay storage/query, and any source-side egress)",
       "Scheduled, managed transfers (no infrastructure)",
-      "Not real-time; use Pub/Sub for streaming",
+      "Not real-time; use Pub/Sub/Dataflow for streaming or Datastream for CDC",
       "No transformation; use Dataflow if ETL needed"
     ],
     externalLink: "https://cloud.google.com/bigquery-transfer/docs"
@@ -2738,5 +3198,606 @@ Common Mismatches to Avoid:
       "Content masking, network exfiltration boundaries, and key custody are three separate problems needing three separate controls"
     ],
     externalLink: "https://cloud.google.com/vpc-service-controls/docs/overview"
+  },
+  {
+    id: "dataproc-serverless",
+    title: "Dataproc Serverless for Spark",
+    category: "Dataproc",
+    content: `Running Spark batch workloads without provisioning or managing a cluster.
+
+What It Is:
+- A managed way to run Spark batch workloads (and interactive sessions) with no cluster to create, size, or delete
+- Google provisions compute behind the scenes, runs the workload, and reclaims resources when it finishes
+- Billed only for the time the workload actually executes
+
+Autoscaling:
+- On by default, using Spark's dynamic resource allocation to decide how much to scale up or down
+- Spark properties can be overridden at submission time to influence autoscaling behavior
+
+When to Use Serverless vs. a Cluster:
+- Serverless: jobs that don't need custom cluster configuration (init actions, custom images) and don't need to sequence multiple jobs on one warm cluster
+- Traditional (ephemeral) Dataproc cluster: jobs requiring tailored cluster setup, specific initialization actions, or a cluster shared across a sequence of jobs (often coordinated via Workflow Templates)
+- Persistent cluster: only when jobs run near-continuously and idle teardown/startup overhead would outweigh the savings
+
+Operational Notes:
+- No SSH access to worker nodes the way a traditional cluster allows
+- Ideal for intermittent, self-contained batch Spark jobs where minimizing operational overhead matters more than fine-grained cluster tuning`,
+    keyPoints: [
+      "No cluster to provision, size, or delete; billed only for actual execution time",
+      "Autoscaling is on by default via Spark dynamic resource allocation",
+      "Best fit for intermittent, self-contained batch jobs without custom cluster configuration needs",
+      "Use a traditional (ephemeral) cluster instead when init actions, custom images, or multi-job sequencing on one cluster are required"
+    ],
+    externalLink: "https://cloud.google.com/dataproc-serverless/docs/overview"
+  },
+  {
+    id: "data-fusion-overview",
+    title: "Cloud Data Fusion: Visual, Code-Free ETL",
+    category: "Data Fusion",
+    content: `A visual, drag-and-drop data integration tool for building ETL/ELT pipelines without writing Beam or Spark code.
+
+Core Concept:
+- Pipeline Studio: a graphical canvas where sources, transforms, and sinks are connected visually
+- A large library of pre-built plugins/connectors covers common sources (SQL Server, Salesforce, SAP, flat files, cloud storage) and sinks (BigQuery, Cloud Storage, Spanner)
+- Under the hood, pipelines compile to and execute as Spark jobs on an ephemeral Dataproc cluster, invisible to the pipeline author
+
+Why It Exists:
+- Lets non-engineers (data analysts, ETL developers without Beam/Spark experience) build and maintain production pipelines
+- Reduces custom connector code for common heterogeneous enterprise sources
+
+When to Use It:
+- Many varied sources need integrating with mostly standard transformations (joins, filters, aggregations, format conversion)
+- The team authoring pipelines is not primarily software engineers
+
+When Not To:
+- Transformation logic is highly custom or requires arbitrary code beyond available plugins/wrangler transforms — write a Dataflow (Beam) pipeline instead
+- Pure SQL transformations on data already in BigQuery — Dataform is a lighter-weight fit`,
+    keyPoints: [
+      "Visual, plugin-based ETL/ELT authoring; no Beam/Spark code required from the pipeline author",
+      "Executes on managed, ephemeral Dataproc/Spark infrastructure behind the scenes",
+      "Best fit when sources are heterogeneous and pipeline authors are not primarily engineers",
+      "Reach for hand-coded Dataflow when transformation logic exceeds what plugins/wrangler support"
+    ],
+    externalLink: "https://cloud.google.com/data-fusion/docs/concepts/overview"
+  },
+  {
+    id: "dataplex-governance",
+    title: "Dataplex: Lakes, Zones, and Federated Governance",
+    category: "Governance",
+    content: `Organizing and governing distributed data across BigQuery and Cloud Storage without moving it.
+
+Core Concepts:
+- Lake: a logical grouping representing a business domain (e.g., "finance," "marketing")
+- Zone: a sub-grouping within a lake, typically raw (landing) vs. curated (cleansed/modeled), each with its own access and management policy
+- Assets: existing BigQuery datasets or Cloud Storage buckets attached to a zone — data is not copied or moved, only logically organized and governed
+
+What Dataplex Adds on Top of Existing Storage:
+- Unified discovery and search across attached BigQuery and GCS assets (via Dataplex Catalog)
+- Automated data-quality tasks (rule-based checks) that can run against zone assets on a schedule
+- Data profiling to understand shape/distribution of data in a zone
+- Centralized access policy applied at the lake/zone level, propagating to underlying assets
+
+Federated Governance Model:
+- Central platform team can set organization-wide policy (structure, security baselines) while domain teams retain ownership of their own data and quality rules within their zone
+- Avoids both extremes: a single centrally-controlled monolith, and fully ungoverned per-team silos
+
+When to Reach for Dataplex vs. Alternatives:
+- Need to organize/govern data already spread across many BigQuery datasets and GCS buckets without a physical migration → Dataplex
+- Need to externally publish curated data to other teams/partners → Analytics Hub (a different, complementary concern: sharing, not internal organization)`,
+    keyPoints: [
+      "Lakes and zones logically organize existing BigQuery/GCS assets without moving data",
+      "Provides unified discovery, access policy, data-quality, and profiling at the zone level",
+      "Enables federated governance: central baseline policy, domain teams retain ownership within their zone",
+      "Distinct from Analytics Hub, which handles external, curated data sharing rather than internal organization"
+    ],
+    externalLink: "https://cloud.google.com/dataplex/docs/introduction"
+  },
+  {
+    id: "alloydb-cloudsql-comparison",
+    title: "AlloyDB vs. Cloud SQL for PostgreSQL",
+    category: "Databases",
+    content: `Choosing between AlloyDB and Cloud SQL when the workload is PostgreSQL-compatible.
+
+AlloyDB for PostgreSQL:
+- PostgreSQL-wire-compatible, but with a re-architected storage layer (disaggregated compute/storage) for higher throughput
+- Built-in in-memory columnar engine that automatically accelerates analytical/aggregation queries against live transactional data, enabling HTAP (hybrid transactional/analytical processing) with minimal impact on concurrent OLTP traffic
+- Positioned for demanding, mission-critical workloads, including those that mix heavy transactional load with real-time analytical queries
+
+Cloud SQL for PostgreSQL:
+- Managed PostgreSQL close in behavior/performance to stock, self-managed PostgreSQL
+- A traditional managed-VM model (fixed-size instances, persistent disks)
+- More cost-effective and flexible for general-purpose OLTP workloads without a strong concurrent-analytics requirement
+
+Decision Guidance:
+- Same database instance must serve both heavy OLTP and real-time analytical/aggregation queries without one degrading the other → AlloyDB (its columnar engine is the differentiator)
+- Straightforward OLTP workload, cost-sensitivity matters, or no need for in-place analytical acceleration → Cloud SQL
+- Need genuine large-scale OLAP over historical data (not just live-table rollups) → BigQuery, not either OLTP-oriented database
+
+Common Mistake:
+- Assuming a bigger Cloud SQL machine type or an extra read replica solves OLTP/analytics contention — neither adds a columnar accelerator; they only delay or relocate the same underlying scan cost`,
+    keyPoints: [
+      "AlloyDB is PostgreSQL-compatible with a built-in columnar engine enabling HTAP: fast analytics on live transactional data",
+      "Cloud SQL behaves close to stock PostgreSQL and lacks a built-in analytical accelerator",
+      "Choose AlloyDB specifically when the same data must serve both heavy OLTP and real-time analytical queries",
+      "A bigger Cloud SQL instance or a read replica does not solve OLTP/analytics contention the way AlloyDB's columnar engine does"
+    ],
+    externalLink: "https://cloud.google.com/alloydb/docs/overview"
+  },
+  {
+    id: "datastream-cdc",
+    title: "Datastream: Log-Based Change Data Capture",
+    category: "Data Ingestion",
+    content: `Streaming database changes into GCP with minimal source impact, using log-based CDC.
+
+How It Works:
+- Reads a source database's native replication log (e.g., MySQL binlog, Oracle redo log, PostgreSQL logical replication) rather than issuing repeated queries
+- Captures every insert, update, and delete as a change event, in order, including deletes — something query-based polling struggles to capture reliably
+- Performs an initial backfill (snapshot) of existing data, then switches to continuous streaming of ongoing changes
+
+Destinations:
+- BigQuery: changes are continuously merged into corresponding tables for near-real-time analytics
+- Cloud Storage: changes land as files for custom downstream processing
+- Can feed a Dataflow pipeline for further transformation before landing
+
+Why Log-Based CDC Beats Polling:
+- Minimal load on the source database (reading a log stream, not running SELECT queries against production tables repeatedly)
+- Captures deletes and the full ordered history of changes, not just periodic snapshots
+- Much lower latency than scheduled batch exports for "needs to be fresh within minutes" requirements
+
+When to Use Datastream vs. Alternatives:
+- Continuous, low-latency replication of an operational database's changes, including deletes → Datastream
+- One-time or infrequent bulk copy of files/objects → Storage Transfer Service
+- Recurring scheduled load from a supported SaaS/warehouse source → BigQuery Data Transfer Service`,
+    keyPoints: [
+      "Log-based CDC reads the database's replication log, not repeated queries, minimizing source load",
+      "Captures inserts, updates, and deletes in order, after an initial backfill snapshot",
+      "Streams to BigQuery or Cloud Storage with near-real-time latency",
+      "Choose over Storage Transfer Service / BigQuery Data Transfer Service when continuous change-level fidelity (including deletes) from an operational database is required"
+    ],
+    externalLink: "https://cloud.google.com/datastream/docs/overview"
+  },
+  {
+    id: "spanner-schema-design",
+    title: "Spanner Schema Design: Interleaving and Key Distribution",
+    category: "Spanner",
+    content: `Two related but distinct schema decisions: how to place child rows relative to parents, and how to avoid write hotspots.
+
+Interleaved Tables:
+- A child table can be declared as interleaved in a parent table, requiring the child's primary key to be prefixed with the parent's full primary key
+- Spanner physically stores each parent row together with its interleaved child rows in the same split, up to seven levels of nested hierarchy
+- Benefit: reading or writing a parent with its children touches co-located data instead of crossing splits, and child rows can be configured to cascade-delete with their parent
+- Trade-off: interleaving suits parent-with-children access patterns; if children are frequently queried independently across all parents, a plain table with a secondary index is a better fit
+
+Primary Key Hotspotting:
+- Spanner shards data into splits by contiguous primary key range, exactly like Bigtable shards by row key range
+- A monotonically increasing primary key (auto-increment ID, current timestamp) concentrates all new writes into the single newest split, regardless of how many nodes the instance has
+- Fixes: use a UUID (random distribution), a bit-reversed sequential value, or a well-distributed natural key as the leading key component
+
+Combining Both:
+- Interleaving determines physical co-location of related rows (a design choice about access patterns)
+- Key distribution determines whether writes spread evenly across splits (a design choice about write throughput)
+- Getting the leading key component wrong breaks distribution even in an otherwise well-interleaved schema`,
+    keyPoints: [
+      "Interleaved child tables co-locate parent and child rows in the same split for fast combined reads/writes",
+      "Interleaving requires the child's primary key to be prefixed with the parent's primary key",
+      "Monotonically increasing primary keys hotspot Spanner writes into one split, regardless of node count",
+      "Use UUIDs, bit-reversal, or a well-distributed natural key to avoid hotspots, just as with Bigtable row keys"
+    ],
+    externalLink: "https://cloud.google.com/spanner/docs/whitepapers/optimizing-schema-design"
+  },
+  {
+    id: "bigquery-ml",
+    title: "BigQuery ML: Training and Scoring Models in SQL",
+    category: "BigQuery",
+    content: `Training, evaluating, and serving predictions from machine learning models using SQL, directly against BigQuery data.
+
+Core Workflow:
+- CREATE MODEL ... OPTIONS(model_type=...) trains a model directly on a BigQuery table or query result
+- ML.EVALUATE returns standard evaluation metrics (accuracy, precision/recall, ROC AUC, etc. depending on model type)
+- ML.PREDICT generates predictions against new rows, still entirely in SQL
+
+Supported Model Types (representative, not exhaustive):
+- Linear/logistic regression, k-means clustering, matrix factorization, time-series (ARIMA_PLUS), boosted trees, deep neural networks
+- Can also import trained TensorFlow/ONNX/XGBoost models for prediction inside BigQuery
+
+Why Teams Use It:
+- No data export required — training happens where the data already lives
+- No separate ML infrastructure to provision or manage
+- Accessible to SQL-proficient analysts without a Python/ML engineering background
+
+When Not To Use BigQuery ML:
+- The required architecture or framework isn't supported (custom deep learning architectures, non-tabular data like images without embeddings) — use Vertex AI custom training instead
+- Need fine-grained control over training infrastructure (specific GPUs/TPUs, custom containers) — use Vertex AI custom training`,
+    keyPoints: [
+      "CREATE MODEL, ML.EVALUATE, and ML.PREDICT train, evaluate, and score models entirely in SQL",
+      "Trains directly on BigQuery data with no export and no separate ML infrastructure",
+      "Accessible to SQL-only analysts without Python/ML engineering skills",
+      "Move to Vertex AI custom training when architecture control or unsupported model types are needed"
+    ],
+    externalLink: "https://cloud.google.com/bigquery/docs/bqml-introduction"
+  },
+  {
+    id: "vertex-ai-pipelines-registry",
+    title: "Vertex AI Pipelines and Model Registry",
+    category: "Vertex AI",
+    content: `Turning ad hoc notebook-driven model training into a reproducible, versioned, auditable workflow.
+
+Vertex AI Pipelines:
+- Defines an ML workflow (preprocess, train, evaluate, conditionally register) as a DAG of discrete, containerized steps
+- Each pipeline run is automatically tracked, with inputs/outputs (datasets, models, metrics) recorded as lineage via Vertex ML Metadata
+- Supports conditional logic (e.g., only register a model if evaluation metrics clear a threshold) and reusable, parameterized components across runs
+
+Vertex AI Model Registry:
+- Each logical model is represented once, with every trained artifact registered as a new version under it
+- Versions carry attached metadata and evaluation metrics, enabling side-by-side comparison across retraining runs
+- One version can be designated as the version an endpoint serves, and rolling back means pointing back at a prior version — no manual file/spreadsheet tracking needed
+
+Why This Combination Matters:
+- Pipelines make the training process itself reproducible and auditable (how a model was produced)
+- Model Registry makes the resulting artifacts reproducible and auditable (which version exists, is serving, or should be rolled back to)
+- Together they replace "a set of manually-run notebook cells" and "the latest file in a Cloud Storage folder" with a governed, versioned system`,
+    keyPoints: [
+      "Vertex AI Pipelines expresses training as a versioned, lineage-tracked DAG instead of manual notebook execution",
+      "Vertex ML Metadata automatically records artifact lineage for each pipeline run",
+      "Model Registry versions every trained model under one logical model resource, with metrics and rollback support",
+      "Together they replace ad hoc, unauditable retraining with a reproducible, governed process"
+    ],
+    externalLink: "https://cloud.google.com/vertex-ai/docs/pipelines/introduction"
+  },
+  {
+    id: "vertex-ai-model-monitoring",
+    title: "Vertex AI Model Monitoring: Skew and Drift Detection",
+    category: "Vertex AI",
+    content: `Automatically detecting when a deployed model's real-world inputs or predictions diverge from what it was trained on.
+
+Two Related Problems:
+- Training-serving skew: a feature's distribution (or attribution) in production requests differs from its distribution in the training data
+- Prediction drift: a feature's distribution (or attribution) in production changes significantly over time, compared to an earlier production window
+
+How Model Monitoring Detects Them:
+- Computes a statistical distance between the compared distributions for each monitored feature
+- Alerts when a feature's distance crosses a configured threshold (e.g., a default attribution skew threshold around 0.3)
+- Can also monitor feature attributions (via Vertex Explainable AI), not just raw feature values, catching cases where a feature's importance to predictions shifts even if its raw distribution looks similar
+
+Why This Beats Manual Alternatives:
+- Manual log review doesn't statistically compare distributions and isn't proactive
+- Blind fixed-schedule retraining doesn't detect whether drift actually occurred, wasting compute when nothing has shifted and potentially under-reacting when a lot has
+- Infrastructure metrics (CPU, latency) say nothing about whether input distributions or prediction quality have changed
+
+Operational Use:
+- Configure monitoring on production endpoints for any model whose input distributions can realistically shift (fraud, demand forecasting, anything tied to real-world behavior)
+- Use monitoring alerts, not a fixed calendar, as the trigger for retraining`,
+    keyPoints: [
+      "Training-serving skew compares production input distributions to the training baseline",
+      "Prediction drift compares production input distributions across time windows",
+      "Feature attribution monitoring (via Explainable AI) can catch importance shifts even without an obvious raw distribution change",
+      "Use monitoring alerts, not a fixed schedule, to trigger retraining"
+    ],
+    externalLink: "https://cloud.google.com/vertex-ai/docs/model-monitoring/overview"
+  },
+  {
+    id: "vertex-ai-embeddings-rag",
+    title: "Embeddings and Vector Search for Retrieval-Augmented Generation",
+    category: "Vertex AI",
+    content: `Preparing unstructured data so an LLM can retrieve and ground its answers in relevant source documents.
+
+The Core Pattern (RAG):
+1. Embed: convert each document/chunk (ticket, article, page) into a vector using an embedding model — the vector captures semantic meaning, not just keywords
+2. Index: store vectors in a vector database/index (Vertex AI Vector Search) that supports fast approximate nearest-neighbor lookup at scale
+3. Retrieve: at query time, embed the incoming query the same way, find the nearest document vectors, and pass those documents as context into the LLM prompt
+4. Generate: the LLM answers grounded in the retrieved documents, rather than relying solely on what it memorized during pretraining
+
+Why Embeddings Beat Keyword Search for This:
+- Semantically similar content can use completely different wording; vector similarity captures "means the same thing," which keyword/LIKE matching cannot
+- Enables grounding an LLM's answer in specific, citable source documents that can be kept current without retraining the model
+
+Why Not Just Fine-Tune on Everything:
+- Fine-tuning bakes general patterns into model weights but doesn't let you point to which specific source justified an answer
+- Keeping a fine-tuned model current as new documents arrive requires re-training; updating a vector index just requires embedding and inserting the new documents
+
+Operational Notes:
+- Re-embed and update the index incrementally as new documents arrive — retrieval freshness doesn't require touching the LLM at all
+- Chunking strategy (how documents are split before embedding) materially affects retrieval quality`,
+    keyPoints: [
+      "RAG embeds documents into vectors capturing semantic meaning, then retrieves nearest matches at query time to ground LLM answers",
+      "Vertex AI provides embedding models and Vector Search for this embed-index-retrieve pattern",
+      "Vector similarity finds semantically similar content that keyword matching would miss",
+      "Keeping retrieval current means updating the vector index, not retraining the model — unlike fine-tuning on the whole corpus"
+    ],
+    externalLink: "https://cloud.google.com/vertex-ai/docs/vector-search/overview"
+  },
+  {
+    id: "bi-engine-materialized-views",
+    title: "BI Engine and Materialized Views for Dashboard Acceleration",
+    category: "BigQuery",
+    content: `Two complementary techniques for making BI dashboards fast against large BigQuery tables.
+
+BI Engine:
+- An in-memory analysis service for BigQuery that caches a working set of frequently-queried data
+- Accelerates supported SQL (used by BI tools like Looker Studio, Looker, or custom dashboards) to sub-second response without changing dashboard queries
+- Best suited to repeated queries over data that doesn't change on every request (dashboards refreshed by users throughout the day against data updated periodically)
+- Sized to the dashboard's actual working set, not the entire underlying table
+
+Materialized Views:
+- Precompute and incrementally maintain the result of a query (typically an aggregation) as new base-table data arrives
+- Dashboard queries against the materialized view read a much smaller, pre-aggregated result instead of re-scanning and re-aggregating the full base table each time
+- BigQuery's query optimizer can also automatically rewrite eligible queries against the base table to use a matching materialized view
+
+Choosing Between Them (often used together):
+- BI Engine accelerates the serving layer generically, regardless of exact query shape, via in-memory caching
+- Materialized views reduce the amount of computation needed in the first place for a specific, known aggregation pattern
+- Neither is a substitute for basic table design (partitioning/clustering) — they accelerate on top of a reasonably designed table, not instead of one`,
+    keyPoints: [
+      "BI Engine caches a dashboard's working set in memory for sub-second query response, without changing dashboard SQL",
+      "Materialized views precompute and incrementally maintain specific aggregations, avoiding repeated full-table scans",
+      "Both target the same 'same query run repeatedly against slowly-changing data' problem from different angles",
+      "Neither replaces basic partitioning/clustering; they accelerate on top of good table design"
+    ],
+    externalLink: "https://cloud.google.com/bigquery/docs/bi-engine-intro"
+  },
+  {
+    id: "data-residency-org-policy",
+    title: "Data Residency and Organization Policy Constraints",
+    category: "Governance",
+    content: `Two related but distinct governance tools: where data physically lives, and centrally enforced guardrails on how resources can be configured.
+
+Data Residency / Sovereignty:
+- Determined by the location chosen for a resource: a BigQuery dataset's location, a Cloud Storage bucket's location/region
+- This is a physical boundary — it determines where data is stored and, for BigQuery, where query processing occurs
+- IAM, VPC Service Controls, and CMEK do not change or enforce this — they govern who can access data, whether it can move across a network perimeter, and who holds encryption keys, respectively, but none of them relocate or pin physical storage
+
+Organization Policy Constraints:
+- Centrally-defined guardrails enforced at resource-creation time across an organization, folder, or project hierarchy
+- Cannot be bypassed by a project's own IAM grants — enforcement happens before the resource is created, not as an access check afterward
+- Common constraints relevant to data engineering: allowed resource locations (restrict which regions resources can be created in), restricting public IP addresses, restricting service account key creation, domain-restricted sharing
+
+Why Both Matter Together:
+- An organization policy constraining allowed locations to only approved regions is how you make a residency requirement structurally impossible to violate by mistake, rather than relying on every engineer remembering to pick the right region each time
+- Residency is the requirement; the location-restricting org policy is the preventive enforcement mechanism for it`,
+    keyPoints: [
+      "Data residency/sovereignty is enforced by resource location (dataset/bucket region), a physical boundary IAM/VPC-SC/CMEK cannot substitute for",
+      "Organization policy constraints are centrally enforced guardrails applied at resource-creation time, not bypassable by project IAM",
+      "The 'resource locations' organization policy constraint is the mechanism for making residency requirements impossible to violate by mistake",
+      "Use organization policy for guardrails that must never be bypassable; use IAM for who can perform otherwise-permitted actions"
+    ],
+    externalLink: "https://cloud.google.com/resource-manager/docs/organization-policy/overview"
+  },
+  {
+    id: "networking-private-connectivity",
+    title: "Private Connectivity for Data Pipelines",
+    category: "Networking",
+    content: `Letting internal-IP-only compute (Dataflow, Dataproc, GCE) reach Google APIs and other resources without public internet exposure.
+
+Private Google Access:
+- Enabled per-subnet; lets VM instances with only internal IP addresses reach Google APIs and services (BigQuery, Cloud Storage, Pub/Sub, etc.) over Google's network
+- Directly solves "no external IP, but still needs to call Google APIs" — the common Dataflow/Dataproc worker security posture
+- Distinct from granting external IPs, which restores connectivity but reintroduces public-internet exposure
+
+VPC Service Controls (recap in a networking context):
+- Defines a service perimeter restricting which projects/APIs data can move between, addressing exfiltration risk
+- Does not, by itself, provide the connectivity path for internal-IP-only VMs to reach Google APIs — Private Google Access is the mechanism for that path; VPC-SC is a separate control over what's allowed to move once connectivity exists
+
+Private Service Connect / Interconnect (broader context):
+- Private Service Connect exposes managed services (including some Google APIs and partner/producer services) via private IP endpoints inside your VPC
+- Cloud Interconnect/VPN provide private connectivity between on-prem networks and a VPC, relevant for hybrid pipelines reading from on-prem sources
+
+Practical Guidance:
+- Default data-processing VMs to no external IP, and enable Private Google Access on their subnet as the norm, reserving external IPs for cases with no viable private alternative`,
+    keyPoints: [
+      "Private Google Access lets internal-IP-only VMs reach Google APIs over Google's network, without exposing them publicly",
+      "This is the fix for Dataflow/Dataproc workers with no external IP failing to reach BigQuery/GCS/Pub/Sub",
+      "VPC Service Controls restricts data movement across a perimeter; it doesn't provide the connectivity path itself",
+      "Prefer no external IP + Private Google Access as the default posture for data-processing compute"
+    ],
+    externalLink: "https://cloud.google.com/vpc/docs/private-google-access"
+  },
+  {
+    id: "pipeline-cicd",
+    title: "CI/CD for Data Pipelines",
+    category: "CI/CD",
+    content: `Treating pipeline code (DAGs, Dataflow templates, Dataform models) as production software, not hand-edited files.
+
+Why It Matters:
+- Manually editing DAG files directly in a production Composer bucket, or manually running deploy commands from a laptop, has no review gate, no change history, and no reliable rollback
+- These are the same risks any production application code faces without CI/CD — data pipelines aren't exempt just because the artifact is a DAG file or a pipeline template instead of a web service
+
+A Typical Pipeline:
+1. Pipeline code (Airflow DAGs, Beam/Dataflow pipeline code, Dataform SQLX models) lives in a git repository
+2. A change triggers CI (e.g., Cloud Build): lint, unit tests, and where feasible a dry-run/validation step
+3. On success, CD deploys: DAG files sync to the Composer environment's bucket, a Dataflow Flex Template is built and pushed, or Dataform is deployed to its production workspace
+4. Deployment is repeatable and identical every time, with the git history providing an audit trail and rollback point
+
+Benefits Over Manual Deployment:
+- Every change is reviewed (e.g., via pull request) before reaching production
+- Failures are caught by tests before deployment, not discovered in production
+- Rollback means reverting a commit and redeploying, not reconstructing what changed from memory
+
+Common Mistake:
+- Treating "it's just a config file" or "it's just a DAG" as a reason to skip the same review/testing discipline applied to application code`,
+    keyPoints: [
+      "Pipeline artifacts (DAGs, Dataflow templates, Dataform models) should be version-controlled like any production code",
+      "CI/CD (e.g., Cloud Build on a git push) adds review, automated testing, and repeatable deployment",
+      "Manual hand-editing of production Composer/Dataflow artifacts removes review and rollback capability",
+      "Rollback via CI/CD means reverting a commit and redeploying, not manually reconstructing prior state"
+    ],
+    externalLink: "https://cloud.google.com/composer/docs/composer-2/manage-dags"
+  },
+  {
+    id: "iam-least-privilege",
+    title: "IAM Least Privilege for Data Platforms",
+    category: "Security",
+    content: `Right-sizing IAM grants so teams can do their job without broader access than needed.
+
+The Principle:
+- Grant the narrowest role or permission set that still lets a principal (user, group, service account) perform its actual required actions
+- Broad predefined roles (like BigQuery Admin or project Owner) bundle many permissions together, often including far more than any one team needs, purely for convenience of granting a single role
+
+Practical Layering for BigQuery:
+- Dataset-level roles (not project-level) scope access to only the datasets a team owns
+- Predefined roles like BigQuery Data Editor/Viewer plus BigQuery Job User cover querying and managing owned data without granting delete rights over other teams' datasets or project-level IAM policy changes
+- Custom roles let you assemble exactly the permissions a team actually uses (informed by IAM Recommender/Policy Analyzer usage data), when no predefined role fits cleanly
+
+Why This Beats the Alternatives:
+- Documentation/trust-based restrictions ("please don't touch other datasets") don't technically prevent anything
+- Removing all standing access in favor of per-action approval creates an operational bottleneck disproportionate to the actual risk
+- Granting broader roles (Owner) to "simplify" access moves further from least privilege, not closer
+
+Ongoing Practice:
+- Periodically review granted roles against actual usage (IAM Recommender) and tighten over-provisioned grants
+- Prefer group-based IAM bindings over per-user grants for maintainability, without relaxing the underlying scope`,
+    keyPoints: [
+      "Grant the narrowest role/permission set that still lets a team perform its actual job",
+      "Prefer dataset-level roles and custom roles over broad project-level admin roles",
+      "Documentation-based trust and per-action approval bottlenecks are not substitutes for correctly-scoped standing IAM grants",
+      "Use IAM Recommender/Policy Analyzer to find and tighten over-provisioned access over time"
+    ],
+    externalLink: "https://cloud.google.com/iam/docs/using-iam-securely"
+  },
+  {
+    id: "disaster-recovery-multiregion",
+    title: "Disaster Recovery: Multi-Region Failover for Data Systems",
+    category: "Reliability",
+    content: `Designing data pipelines and databases to survive the loss of an entire region or zone.
+
+Key Distinction: SLA vs. Architecture:
+- A service's SLA is a compensation commitment (service credits) if availability targets are missed — it is not an availability guarantee and provides no actual failover capability on its own
+- Genuine fault tolerance requires an architecture with real redundant capacity somewhere else, plus a way to redirect traffic/processing to it
+
+Streaming Pipelines (Pub/Sub to Dataflow to BigQuery):
+- Regional failure tolerance requires a redundant deployment in a second region: a standby or active pipeline that can process from a second-region-capable topic, writing to a BigQuery dataset in a multi-region location
+- A documented and tested failover runbook is part of the design, not an afterthought — untested failover procedures often fail when actually needed
+- More workers or more slots within a single region improve capacity/throughput but do nothing if that entire region becomes unavailable
+
+Databases:
+- Cloud SQL high availability (regional configuration): a synchronous standby in a different zone within the same region, with automatic failover on primary failure and minimal data loss — addresses zonal, not regional, failure
+- Cloud Spanner multi-region configurations: replicas across multiple regions with automatic failover, addressing full-region failure for Spanner specifically
+- Memorystore (Redis) clusters: can be configured with cross-zone replication and automatic failover for cache-tier availability
+
+What Backups Alone Don't Solve:
+- Periodic backups/exports bound data loss (RPO) but require manual restore (higher RTO) and don't keep a live pipeline or database running through an outage — they're a complement to HA/multi-region design, not a substitute`,
+    keyPoints: [
+      "An SLA is a compensation term, not an availability guarantee or a failover mechanism",
+      "Regional fault tolerance requires an actual redundant deployment in a second region plus a tested failover path",
+      "Cloud SQL HA addresses zonal failure (synchronous standby, automatic failover); true regional DR needs a broader design",
+      "Periodic backups bound data loss but don't keep a live system running through an outage — they complement, not replace, HA/multi-region design"
+    ],
+    externalLink: "https://cloud.google.com/architecture/disaster-recovery"
+  },
+  {
+    id: "bq-reservations-workload-mgmt",
+    title: "BigQuery Reservations: Isolating Interactive and Batch Workloads",
+    category: "BigQuery",
+    content: `Using reservations to prevent one workload from starving another when they share BigQuery capacity.
+
+The Problem:
+- A single, undifferentiated slot pool serving both interactive (seconds-latency expected) and batch (hours-tolerant) workloads lets a large batch job consume most or all available slots, queuing interactive queries behind it
+
+Reservations as the Fix:
+- A reservation is a named allocation of slot capacity that one or more assignments (projects, folders, or organizations) can be pointed at
+- Creating separate reservations for interactive vs. batch workloads gives each a guaranteed slot floor the other workload cannot consume
+- Idle-slot sharing can be configured so a reservation with spare capacity lends it to another reservation temporarily, improving utilization without permanently reallocating capacity
+
+What Doesn't Solve This:
+- Query priority (INTERACTIVE vs. BATCH) affects scheduling order within shared capacity, but doesn't create the hard isolation a separate reservation provides, and setting analyst queries to BATCH priority actively deprioritizes exactly the workload you're trying to protect
+- Simply adding more total slots to one shared pool increases the ceiling but doesn't stop a single large batch job from transiently claiming most of it
+- Asking users to change their behavior/schedule is a process workaround, not a capacity-management solution
+
+Capacity Management Practice:
+- Size each reservation to its workload's actual SLA needs (interactive: enough for low queueing at typical concurrency; batch: enough to finish within its window)
+- Revisit sizing periodically using slot utilization metrics rather than guessing`,
+    keyPoints: [
+      "Reservations give named, isolated slot allocations to different workloads, preventing one from starving another",
+      "Idle-slot sharing lets a reservation lend spare capacity to another without permanent reallocation",
+      "Query priority alone does not provide the same hard isolation as separate reservations",
+      "Adding more slots to one shared pool masks, rather than fixes, a workload-isolation problem"
+    ],
+    externalLink: "https://cloud.google.com/bigquery/docs/reservations-intro"
+  },
+  {
+    id: "bq-troubleshooting-quotas",
+    title: "Troubleshooting BigQuery Quota and Billing Errors",
+    category: "BigQuery",
+    content: `A systematic approach to diagnosing "quota exceeded" and billing-related failures instead of guessing.
+
+Start With the Actual Error:
+- BigQuery (and GCP services generally) return a specific error code and message identifying which limit was hit — for example, distinct errors exist for exceeding per-table update operations in a day, per-project concurrent/daily load job limits, per-query resource limits, and billing-account-related suspension
+- The specific error is the fastest path to the correct fix; different causes require different remediations (waiting for a rolling daily limit to reset, requesting a quota increase, restructuring a job to batch more updates together, or resolving a billing account issue)
+
+Cross-Check the Quotas Page:
+- The project's Quotas page in the console shows current usage against each named quota/limit, confirming which one is actually being approached or exceeded
+- This avoids acting on an assumption (e.g., "must be billing") when the real constraint is something else entirely (e.g., a per-table update limit from too many small streaming/DML operations)
+
+What to Avoid:
+- Requesting a blanket increase across many quotas without identifying which one actually failed wastes time and may not address a quota that isn't adjustable by request
+- Jumping to a billing-account fix without confirming the error is billing-related risks missing the actual (unrelated) cause
+- Destructive actions (dropping/recreating tables) in response to a quota error address nothing and risk data loss
+
+General Principle:
+- Read the error, confirm against the Quotas page, then act — in that order, every time`,
+    keyPoints: [
+      "GCP quota errors name the specific limit that was exceeded — read it before taking action",
+      "The Quotas page shows current usage against each named limit, confirming the actual cause",
+      "Different quota causes require different fixes; a blanket increase request or a billing assumption can miss the real issue",
+      "Never take destructive action (dropping tables) in response to a quota error"
+    ],
+    externalLink: "https://cloud.google.com/bigquery/quotas"
+  },
+  {
+    id: "dataflow-ai-enrichment",
+    title: "AI Data Enrichment Within Dataflow Pipelines",
+    category: "Dataflow",
+    content: `Calling machine learning models from within a pipeline transform to enrich records as they flow through.
+
+The Pattern:
+- A pipeline transform (a DoFn, or an Apache Beam ML-oriented transform) calls a model — a pre-trained managed API (Cloud Natural Language, Translation, Vision) or a deployed custom Vertex AI endpoint — per element or in small batches
+- The model's output (sentiment score, extracted entities, a classification, a translation) is added to the record before it continues downstream to its sink (commonly BigQuery)
+- This keeps enrichment as an integrated pipeline step rather than a separate manual or deferred process
+
+When a Pre-Trained API Is Enough:
+- Common enrichment needs (sentiment analysis, entity extraction, language detection/translation, image labeling) are well covered by existing pre-trained APIs — no need to train or manage a custom model for these
+- Calling the API from within the pipeline keeps latency and cost proportional to actual data volume, without building bespoke ML infrastructure
+
+When a Custom Model Is Warranted Instead:
+- The enrichment task is domain-specific and no pre-trained API covers it adequately (e.g., a proprietary product-defect classifier) — deploy a custom Vertex AI endpoint and call it the same way from the pipeline transform
+- Training a model from scratch inside a running pipeline worker is never the right pattern regardless of API availability — training and serving are separate concerns from the pipeline's per-record processing
+
+Operational Considerations:
+- Batch calls to external model APIs where possible to reduce per-call overhead
+- Handle API rate limits/retries within the enrichment transform so a transient failure doesn't fail the whole pipeline element`,
+    keyPoints: [
+      "AI data enrichment calls a model from within a pipeline transform to augment records as they flow through",
+      "Pre-trained APIs (sentiment, entities, translation, vision) cover common enrichment needs without custom model training",
+      "Deploy a custom Vertex AI endpoint and call it the same way when no pre-trained API fits the specific need",
+      "Training a model from scratch inside a running pipeline worker is never the right pattern"
+    ],
+    externalLink: "https://cloud.google.com/dataflow/docs/machine-learning"
+  },
+  {
+    id: "llm-query-generation-cleaning",
+    title: "Prompting LLMs for Query Generation and Data Cleaning",
+    category: "Data Preparation",
+    content: `Using LLMs as a drafting aid for SQL and data-cleaning logic, with human review as a required step.
+
+What This Covers:
+- Translating a plain-English analytical request into draft SQL against a schema (especially useful for large, unfamiliar schemas where recalling every join path and column name is impractical)
+- Suggesting likely data-cleaning rules by inspecting sample data (e.g., flagging inconsistent country-code formats, mixed date formats, likely duplicate keys)
+- This is explicitly recognized as a legitimate data-preparation aid, not a shortcut to be avoided outright
+
+Why Review Remains Required:
+- An LLM drafting SQL against an unfamiliar 40-table schema can plausibly get join cardinality, filter semantics, or column meaning wrong in ways that look syntactically correct but produce silently wrong results
+- Generated cleaning rules are hypotheses based on visible samples, not guarantees that hold across the full dataset
+- The appropriate workflow is: generate a draft, validate it against the actual schema/data (ideally read-only or on a sandbox/dev dataset), and only then rely on it for production reporting or DML
+
+What Not To Do:
+- Letting generated SQL execute DML directly against production with no review risks silent data corruption or misreporting
+- Refusing to use LLM assistance at all discards a genuinely useful productivity aid for exactly the kind of unfamiliar-schema exploration it's suited for
+- Restricting LLM use to post-hoc documentation only, never for drafting, throws away its main value for this task`,
+    keyPoints: [
+      "LLM-assisted query generation and cleaning-rule suggestion is a recognized, legitimate data-preparation aid",
+      "Especially valuable for translating plain-English requests into SQL against large, unfamiliar schemas",
+      "Generated SQL/rules require human validation against the real schema and data before production use",
+      "Never let LLM-generated SQL execute DML against production without a review step"
+    ],
+    externalLink: "https://cloud.google.com/bigquery/docs/generate-sql-with-gemini"
   }
 ];
