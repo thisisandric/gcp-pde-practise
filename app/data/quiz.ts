@@ -948,6 +948,126 @@ export const quizQuestions: QuizQuestion[] = [
     explanation: "Prompting LLMs to help generate queries and suggest data-cleaning logic is a recognized productivity aid for data preparation, especially against unfamiliar or large schemas — but like any generated code, it requires human review and validation against the actual schema and data before being trusted, particularly before anything beyond read-only exploration. Letting it execute DML unreviewed risks silently corrupting or misreporting data against a schema it doesn't fully understand; refusing to use it at all discards a legitimate aid; restricting it to post-hoc documentation discards its usefulness for the query-drafting step itself.",
     bestPractice: "Treat LLM-drafted SQL and cleaning rules as a first draft that speeds up exploration, always validated by the analyst against the real schema/data (ideally read-only or on a sandbox dataset first) before use in production reporting or DML.",
     references: ["llm-query-generation-cleaning", "dataform-elt"]
+  },
+  {
+    id: 63,
+    question: "A team scans a sustained 32 TB/day in BigQuery, every day of the month, with a stable, predictable query mix (960 TB/month scanned on-demand ≈ $6,000/month at $6.25/TiB). They want to cut this recurring cost without changing any queries. What should they do?",
+    topic: "BigQuery",
+    difficulty: "hard",
+    options: [
+      { text: "Switch to an Enterprise Edition reservation with a 100-slot baseline and autoscaling for bursts, since steady, predictable volume is exactly what capacity pricing is built for", correct: true },
+      { text: "Keep on-demand pricing, since it's always cheaper than a reservation", correct: false },
+      { text: "Set maximum_bytes_billed on every query to cap the monthly bill", correct: false },
+      { text: "Migrate the workload to Dataproc/Spark SQL to avoid BigQuery's pricing entirely", correct: false }
+    ],
+    explanation: "On-demand pricing scales with bytes scanned regardless of how predictable that volume is — at 960 TB/month it costs roughly $6,000/month with no ceiling. A capacity-based Enterprise Edition reservation (baseline slots running 24/7, billed per slot-hour, e.g., ~100 slots × $0.06/hr × ~730 hr/month ≈ $4,380/month) turns that same steady workload into flat, lower, predictable spend, with autoscaling absorbing occasional bursts above baseline. On-demand is cheaper specifically for unpredictable or low-volume workloads (as in a separate scenario with sporadic queries), not for this one. maximum_bytes_billed only prevents a single runaway query from exceeding a byte limit — it doesn't lower the cost of queries that already run as expected. Re-platforming to Dataproc discards BigQuery's managed engine to solve a pricing-model problem that reservations already solve.",
+    bestPractice: "Move steady, high-volume, predictable BigQuery workloads from on-demand to a capacity-based Edition reservation (with autoscaling for bursts) once sustained monthly on-demand spend clearly exceeds what an equivalent slot commitment would cost; keep on-demand for unpredictable or low-volume workloads.",
+    references: ["bq-optimization-techniques", "bq-pricing-model", "bq-slots-commitment"]
+  },
+  {
+    id: 64,
+    question: "A Dataproc cluster autoscales using preemptible secondary workers to handle a nightly Spark job with several large shuffle-heavy joins. The job frequently fails with lost shuffle data and repeated stage retries whenever the autoscaler scales secondary workers down mid-job, even though the job eventually succeeds after wasted time. What should be enabled to fix this without abandoning preemptible secondary workers?",
+    topic: "Dataproc",
+    difficulty: "hard",
+    options: [
+      { text: "Enhanced Flexibility Mode (EFM) with a graceful decommission timeout, so shuffle data is migrated off a secondary worker before it's removed", correct: true },
+      { text: "Increase minInstances so the autoscaler never scales secondary workers down during the job", correct: false },
+      { text: "Move the shuffle-heavy joins to primary workers only by disabling secondary workers entirely", correct: false },
+      { text: "Switch spark.serializer to Kryo to make shuffle data smaller and faster to lose", correct: false }
+    ],
+    explanation: "By default, scaling down a secondary worker discards whatever shuffle data it was holding, forcing every task that depended on it to retry from scratch — exactly the symptom described. Enhanced Flexibility Mode reroutes in-progress shuffle data (to primary workers or a shuffle service) before a secondary worker is removed, combined with a graceful decommission timeout that gives it time to finish handing off that data; this preserves the cost benefit of preemptible secondary workers while eliminating the retry storm. Raising minInstances just avoids the trigger rather than fixing the underlying data-loss mechanism, and defeats the purpose of autoscaling down at all. Removing secondary workers entirely sacrifices the autoscaling/cost benefit altogether. Kryo serialization improves shuffle data size and speed but does nothing to prevent it from being discarded on worker removal.",
+    bestPractice: "When mixing autoscaling preemptible/Spot secondary workers with shuffle-heavy Spark jobs, enable Enhanced Flexibility Mode with a graceful decommission timeout so in-flight shuffle data survives scale-down instead of being discarded.",
+    references: ["dataproc-optimization", "dataproc-preemptible", "dataproc-config"]
+  },
+  {
+    id: 65,
+    question: "A Cloud Composer 2 environment runs 300+ DAGs. Airflow's UI shows many tasks sitting in the 'queued' state for 10+ minutes before starting, while Cloud Monitoring shows worker pods at under 30% CPU utilization the whole time. What should be tuned first?",
+    topic: "Cloud Composer",
+    difficulty: "hard",
+    options: [
+      { text: "Increase the number of Airflow scheduler replicas (and check core.parallelism / max_active_tasks_per_dag), since idle workers with queued tasks points to a scheduling bottleneck, not a compute shortage", correct: true },
+      { text: "Increase the Composer environment's worker machine type, since queued tasks mean workers need more power", correct: false },
+      { text: "Add more retries with longer backoff to each task so queued tasks eventually run", correct: false },
+      { text: "Switch every DAG's schedule_interval to run less frequently so fewer tasks queue at once", correct: false }
+    ],
+    explanation: "Low worker CPU with a large 'queued' backlog is the textbook signature of a scheduler bottleneck: with too few scheduler replicas (or a single scheduler saturated parsing 300+ DAGs), tasks aren't being handed to workers fast enough, even though workers have plenty of spare capacity to run them. Composer 2 supports multiple scheduler replicas specifically for this. Bigger worker machines address CPU/memory pressure during task execution, not a bottleneck in getting tasks to workers at all — CPU is already low. More retries/backoff delays failing tasks further but doesn't address why healthy tasks are stuck queued. Reducing schedule frequency masks the symptom without fixing the scheduler capacity mismatch, and delays legitimate work.",
+    bestPractice: "When tasks sit queued while workers are idle, scale Airflow scheduler replicas and check the parallelism ceilings (core.parallelism, max_active_tasks_per_dag, max_active_runs) before scaling worker compute — the two are independent bottlenecks with different symptoms.",
+    references: ["composer-orchestration"]
+  },
+  {
+    id: 66,
+    question: "A Bigtable table for a multi-tenant billing system uses row keys prefixed with customer_id (a high-cardinality field), which fixed the platform's general hotspotting problem across most customers. However, one enterprise customer alone generates 40% of total write volume, and monitoring/Key Visualizer shows that single customer's key range still overwhelming one tablet server. What additional technique addresses this specific remaining hotspot?",
+    topic: "Bigtable",
+    difficulty: "hard",
+    options: [
+      { text: "Salting: prepend a computed hash bucket (e.g., hash(row_key) % N) to spread that one customer's writes across N key prefixes instead of one", correct: true },
+      { text: "Add more nodes to the cluster so the one hot tablet gets more compute", correct: false },
+      { text: "Switch that customer's data to a separate column family with a shorter GC policy", correct: false },
+      { text: "Reverse the customer_id string to change its lexicographic position", correct: false }
+    ],
+    explanation: "Field promotion (leading with customer_id) fixed the cross-customer distribution problem, but it doesn't help when a single key's own traffic is high enough to overwhelm the one tablet range that key maps to — the field is already promoted, and there's no second field to promote. Salting solves exactly this remaining case: computing a hash bucket and prepending it splits that one customer's writes across N distinct prefixes (and therefore N different tablets), at the cost of needing to fan out reads across all N buckets when querying that customer's full history. Adding nodes doesn't help, since tablet assignment is key-range based, not round-robin — the same single key range stays pinned to one tablet server regardless of cluster size. Changing the column family or GC policy affects storage/versioning, not write distribution across tablets. Reversing the string just changes sort order, not the fact that one customer's traffic all shares one (now differently-shaped) prefix.",
+    bestPractice: "When field promotion alone still leaves one specific high-traffic key hot, add salting (a computed hash-bucket prefix) to split that key's writes across multiple tablets, accepting a read fan-out cost across the salt buckets.",
+    references: ["bigtable-optimization", "bigtable-rowkey-design"]
+  },
+  {
+    id: 67,
+    question: "A high-volume Pub/Sub pipeline currently relies on at-least-once delivery, with subscribers maintaining a custom dedup table (keyed by message ID, checked/written on every message) to avoid double-processing retried messages. The dedup table has become a bottleneck, and the team also wants to reduce publish-side API call overhead from many small messages. What should they do?",
+    topic: "Pub/Sub",
+    difficulty: "medium",
+    options: [
+      { text: "Enable exactly-once delivery on the subscription to remove the need for custom dedup, and configure publisher batching (max messages/bytes/latency) to reduce per-call overhead", correct: true },
+      { text: "Add ordering keys to every message so Pub/Sub guarantees no duplicates", correct: false },
+      { text: "Increase the ack deadline to several hours so messages are never redelivered", correct: false },
+      { text: "Switch to push subscriptions, since push delivery is exactly-once by default", correct: false }
+    ],
+    explanation: "Exactly-once delivery is an opt-in per-subscription setting that has Pub/Sub itself guarantee no duplicate delivery for successfully acknowledged messages, directly eliminating the need for a hand-built dedup table and its bottleneck. Publisher-side batching settings amortize per-publish-RPC overhead across many small messages, addressing the second complaint, at the cost of some added publish-side latency. Ordering keys guarantee per-key order, not deduplication — they solve a different problem. An excessively long ack deadline doesn't prevent all redelivery (retries, crashes, and nacks can still cause it) and just delays legitimate reprocessing of genuinely stuck messages. Push subscriptions are not exactly-once by default; delivery semantics (at-least-once vs. exactly-once) are independent of push vs. pull and must be explicitly configured on the subscription either way.",
+    bestPractice: "Prefer Pub/Sub's built-in exactly-once delivery over custom dedup logic when it fits the workload, and tune publisher batching settings (max messages/bytes/latency) to cut per-call overhead at high publish rates.",
+    references: ["pubsub-throughput", "pubsub-schema-dlq", "pubsub-quota"]
+  },
+  {
+    id: 68,
+    question: "A Dataflow streaming pipeline performs a large windowed aggregation (GroupByKey over a 1-hour window with substantial per-key state) using classic (worker-based) execution. Workers frequently run out of memory during peak load, and the team has already tried larger machine types with only marginal improvement. What's the most effective fix?",
+    topic: "Dataflow",
+    difficulty: "hard",
+    options: [
+      { text: "Enable Streaming Engine, which offloads shuffle and windowing state off the worker VMs to the Dataflow service backend", correct: true },
+      { text: "Switch the autoscaling algorithm from THROUGHPUT_BASED to CPU_BASED", correct: false },
+      { text: "Reduce the window size to 1 minute to shrink the aggregation, even though the business requirement is hourly aggregation", correct: false },
+      { text: "Increase max_num_workers without changing machine type, so more, smaller workers can each hold less state", correct: false }
+    ],
+    explanation: "With classic execution, shuffle and windowing state live on the worker VMs themselves, so large keyed state or heavy shuffle can exhaust worker memory regardless of machine type — which matches why bigger machines only helped marginally. Streaming Engine moves that state and shuffle management to the Dataflow service backend, letting workers run smaller and avoid being bottlenecked by local state size; it's the standard fix for exactly this symptom and is Google's default recommendation for new streaming jobs. CPU_BASED autoscaling responds to CPU utilization, not memory pressure from state size, so it wouldn't address an OOM pattern. Shrinking the window to sidestep a real business requirement (hourly aggregation) changes the answer the pipeline produces, which isn't an acceptable trade-off. Adding more workers without addressing where state lives just spreads the same total per-key state thinner across more worker-local memory pools, which helps only partially and doesn't address the architectural cause.",
+    bestPractice: "When large per-key windowed state causes OOM under classic Dataflow execution, enable Streaming Engine to offload state/shuffle from worker VMs before scaling machine type or worker count further.",
+    references: ["dataflow-performance", "dataflow-autoscaling", "dataflow-windowing"]
+  },
+  {
+    id: 69,
+    question: "A Cloud Spanner instance serves an operational read-write workload during business hours plus a large nightly analytics batch job that reads most of the database for reporting. The team currently provisions a fixed, large node count sized for the nightly batch peak, leaving that capacity mostly idle during the rest of the day, and the analytics reads occasionally contend with operational traffic for the same resources. What combination best addresses both cost and contention?",
+    topic: "Spanner",
+    difficulty: "hard",
+    options: [
+      { text: "Enable Spanner's built-in autoscaler to size processing units to actual CPU/storage demand, and run the nightly analytics reads as bounded-staleness read-only transactions instead of strong reads", correct: true },
+      { text: "Keep the fixed node count, but move the analytics job to run during business hours to better utilize the provisioned capacity", correct: false },
+      { text: "Interleave all analytics-relevant tables under a single parent table to speed up the nightly reads", correct: false },
+      { text: "Switch the primary keys to UUIDs to eliminate contention between operational and analytics traffic", correct: false }
+    ],
+    explanation: "Autoscaling adjusts processing units automatically between a configured min/max based on CPU and storage targets, so the instance isn't permanently sized for the nightly peak — it scales up for the batch window and back down afterward, cutting the idle-capacity cost. Bounded-staleness read-only transactions can be served from any sufficiently up-to-date replica without taking locks, which is exactly what a reporting read that can tolerate a few seconds of lag needs, reducing contention with the read-write operational path (whose short read-write transactions do take locks). Moving analytics to business hours increases contention with operational traffic rather than reducing it. Interleaving is a schema decision about co-locating parent/child rows for combined access patterns; it doesn't address either idle capacity cost or read-vs-write contention on its own. Switching to UUID primary keys addresses write hotspotting from monotonically increasing keys — a different problem than provisioned-capacity cost or read/write contention.",
+    bestPractice: "Combine Spanner's built-in autoscaler (processing units sized to actual CPU/storage demand) with bounded/exact staleness reads for freshness-tolerant reporting workloads, reserving strong reads and short read-write transactions for the latency-sensitive operational path.",
+    references: ["spanner-architecture", "spanner-schema-design"]
+  },
+  {
+    id: 70,
+    question: "Application logs are retained for exactly 45 days before permanent deletion (a fixed retention policy, not subject to change). To save cost, an engineer proposes a lifecycle rule that moves objects from Standard to Coldline storage after 15 days, then deletes them at day 45. Cloud Storage Coldline has a 90-day minimum storage duration. What's wrong with this plan?",
+    topic: "Cloud Storage",
+    difficulty: "medium",
+    options: [
+      { text: "Deleting at day 45 is before Coldline's 90-day minimum storage duration, so Google still bills as if the object stayed the full 90 days — an early deletion fee that can erase or reverse the intended savings", correct: true },
+      { text: "Coldline objects cannot be deleted before their retention policy expires, so the deletion will fail", correct: false },
+      { text: "Lifecycle rules cannot transition an object more than once, so moving to Coldline blocks the later deletion step", correct: false },
+      { text: "Coldline has no minimum storage duration, so the plan is correct as described", correct: false }
+    ],
+    explanation: "Coldline (like Nearline and Archive) has a minimum storage duration — 90 days for Coldline — and deleting or moving an object out before that minimum elapses still bills as though it stayed the full minimum period, an early deletion fee. Since the real retention window here (45 days) is shorter than Coldline's 90-day minimum, tiering into Coldline at day 15 doesn't save money on this data — it can cost more than simply leaving the objects in Standard (or a class whose minimum duration actually fits within 45 days) for their whole 45-day life. The deletion itself isn't blocked or disallowed by Google (that would require an active object hold or retention policy lock, not just early deletion); it's a billing consequence, not an operational failure, and lifecycle rules do support multiple sequential transitions.",
+    bestPractice: "Before tiering data to a colder storage class in a lifecycle policy, confirm the object's real retention/deletion timeline is at least as long as that class's minimum storage duration (30 days Nearline, 90 Coldline, 365 Archive) — otherwise the early deletion fee can offset or exceed the intended savings.",
+    references: ["gcs-cost-optimization", "gcs-lifecycle", "gcs-storage-classes"]
   }
 ];
 
@@ -1097,6 +1217,54 @@ Performance Impact:
       "Partition pruning (date filters) saves 80-95%",
       "Clustering on filter columns saves additional 40-60%",
       "Monitor costs via INFORMATION_SCHEMA.JOBS_BY_PROJECT"
+    ],
+    externalLink: "https://cloud.google.com/bigquery/docs/best-practices-performance-compute"
+  },
+  {
+    id: "bq-optimization-techniques",
+    title: "BigQuery: Choosing Partitioning/Clustering, Avoiding Anti-Patterns, and Storage Cost Controls",
+    category: "BigQuery",
+    content: `A consolidated decision framework for the techniques the exam expects you to combine, not just know individually.
+
+Partitioning vs. Clustering — the choice rule:
+- Partition (by date/timestamp, ingestion-time, or integer-range) when queries reliably filter on a time window or a numeric range — partitioning eliminates entire partitions before any bytes inside them are touched, the largest single lever (typically 80-98% reduction).
+- Cluster (up to 4 columns) on high-cardinality columns that are frequently filtered or grouped on — clustering sorts data within each partition so blocks not matching the filter are skipped, adding another 40-60% reduction on top of partition pruning.
+- Choosing the partition type: use the real business event date/timestamp when one exists and queries filter on it; fall back to ingestion-time only when no reliable event date exists; use integer-range partitioning for evenly distributed numeric keys (e.g., a bucketed customer_id) where a date doesn't apply.
+- Layering both is the default for any large, repeatedly-queried fact table; partitioning alone with no clustering is fine for small/rarely-filtered-further tables.
+
+Query Anti-Patterns (the recurring cost traps):
+- SELECT * forces a full-column scan on every query regardless of partition/cluster pruning — BigQuery is columnar, so unused columns should never be read.
+- Unintended cross joins (a join with a missing or wrong condition) produce a Cartesian product, multiplying row counts and cost far beyond what the query author expects.
+- Fan-out from UNNEST-ing a repeated/nested field without pre-aggregating first multiplies the effective row count processed downstream.
+- ORDER BY on a huge result set without a LIMIT forces the final sort onto a single worker, becoming both a cost and latency bottleneck; push ORDER BY + LIMIT together whenever only a top-N result is needed.
+
+Query-Level Optimizations Beyond Pruning:
+- Approximate aggregate functions (APPROX_COUNT_DISTINCT, APPROX_QUANTILES, APPROX_TOP_COUNT) trade a small, bounded error for large reductions in bytes processed and CPU on very large tables, versus their exact equivalents.
+- Materialized views and BI Engine pre-compute and cache repeated aggregation patterns (typical of dashboards), so repeated queries hit cached/pre-aggregated results instead of rescanning base tables each time.
+- Multi-statement scripting (BEGIN/END blocks, DECLARE, EXECUTE IMMEDIATE) and stored procedures package repeated procedural logic so it isn't hand-duplicated across many ad hoc queries.
+
+Cost Model Choice (on-demand vs. slots vs. Editions vs. flex slots):
+- On-demand ($6.25/TiB scanned) fits unpredictable or low/moderate volume, since there's no capacity to pay for when idle.
+- Capacity-based Editions (Standard/Enterprise/Enterprise Plus, billed per slot-hour) fit steady, predictable, high-volume workloads once sustained on-demand spend consistently exceeds roughly a few thousand dollars a month — the reservation makes spend flat and predictable instead of scan-proportional.
+- Flex slots provide short (as short as 60-minute) slot commitments for temporary bursts (e.g., a month-end batch push) without locking into a monthly/annual commitment.
+- Autoscaling reservations blend a small always-on baseline with burst capacity that scales up only when queued, avoiding the choice between permanently over-provisioning and hard capacity caps.
+- maximum_bytes_billed remains the per-query hard stop regardless of which pricing model is active — it rejects an oversized query before it runs, at zero cost.
+
+Storage Cost Controls:
+- Time travel (default 7 days, configurable 2-7) keeps prior versions of every row queryable and billed as storage — shortening the window on high-churn tables reduces the historical-version storage bill.
+- Table snapshots and clones are metadata-only at creation time (billed only for data that later diverges from the source), a cheap way to branch data for testing or point-in-time backups instead of duplicating a full table copy.
+- Fail-safe (an additional ~7 days after time travel expires, non-queryable, Google-assisted recovery only) is not a configurable lever, but it does mean deleted/overwritten data isn't truly gone the instant time travel ends.
+
+Quotas and Monitoring:
+- INFORMATION_SCHEMA.JOBS_BY_PROJECT / JOBS_BY_USER expose bytes billed, slot-ms consumed, and cache hits per job — the first stop before buying more capacity or investigating an unexpected cost spike.
+- Custom per-project or per-user daily quotas on scanned bytes cap runaway spend in shared, exploratory environments where per-query maximum_bytes_billed alone isn't enough.`,
+    keyPoints: [
+      "Partition for elimination (date/ingestion-time/int-range), cluster (≤4 cols) for within-partition pruning — layering both is the default for large, repeatedly-queried tables",
+      "SELECT *, unintended cross joins, and un-pre-aggregated UNNEST fan-out are the top recurring cost anti-patterns",
+      "On-demand suits unpredictable volume; Editions/reservations suit steady high volume once spend crosses a few thousand dollars/month; flex slots cover short bursts without a long commitment",
+      "Approximate aggregate functions and materialized views/BI Engine cut repeated-query cost with a small, bounded accuracy trade-off",
+      "Time travel window and snapshot/clone usage directly affect storage billing; fail-safe is extra non-configurable retention, not a lever",
+      "INFORMATION_SCHEMA.JOBS_BY_PROJECT is the first stop before adding capacity or chasing a cost spike"
     ],
     externalLink: "https://cloud.google.com/bigquery/docs/best-practices-performance-compute"
   },
@@ -1433,12 +1601,31 @@ Debugging Performance Issues:
 - Check worker CPU (should be 50-80% utilized)
 - Monitor memory (OOM = need larger workers)
 - Check system lag (indicates backlog growth)
-- Profile hot stages (bottleneck identification)`,
+- Profile hot stages (bottleneck identification)
+
+Streaming Engine vs. Dataflow Classic Execution:
+- Classic (worker-based) execution keeps shuffle and windowing state on the worker VMs themselves — large keyed state or heavy shuffle can exhaust worker memory/disk, forcing bigger and more expensive workers just to hold state.
+- Streaming Engine offloads shuffle and state management to the Dataflow service backend, letting workers stay smaller and rebalance faster since they're no longer bottlenecked by local state size; it's the default for new streaming jobs and is generally preferred unless a specific compatibility reason requires classic execution.
+- The batch equivalent, Dataflow Shuffle service, similarly offloads shuffle off worker-local disk for batch jobs.
+
+GroupByKey vs. CoGroupByKey and State/Timers:
+- GroupByKey groups values for a single PCollection by key; CoGroupByKey joins two (or more) PCollections by key in one operation — reach for CoGroupByKey instead of separate GroupByKeys plus a manual join step when correlating two keyed streams.
+- Stateful DoFns (ValueState, BagState) plus timers implement custom per-key logic beyond built-in windowing, but every byte of state is held per key and adds to what Streaming Engine (or the worker) must manage — bound state growth explicitly (expire old entries) rather than letting it grow unbounded per key.
+
+Templates and Flex Templates:
+- Classic templates are pre-compiled, parameterized pipeline graphs that non-engineers or schedulers (Composer, Cloud Scheduler) can launch with runtime parameters, without needing the Beam SDK or source access.
+- Flex Templates package the pipeline as a Docker container, supporting custom dependencies and launch-time pipeline construction that classic templates can't express — prefer Flex Templates whenever custom container dependencies or dynamic construction logic are needed.
+
+Profiling and Quota:
+- The Dataflow job graph UI shows per-step wall time and stragglers; combined with Cloud Profiler (CPU/heap) on workers, this locates the specific fused stage causing a bottleneck instead of guessing from aggregate job metrics.
+- Regional Compute Engine quotas (CPUs, in-use IP addresses) cap how far autoscaling can actually scale a job — a max_num_workers cap that looks safe on paper can still be silently throttled by an underlying regional quota; check both.`,
     keyPoints: [
-      "Throughput-based autoscaling best for streaming",
-      "Batch size trade-off: latency vs. efficiency",
-      "Minimize shuffles (join, group-by) operations",
-      "Monitor system lag; scale up if growing"
+      "Throughput-based autoscaling best for streaming; CPU-based for stable batch workloads",
+      "Streaming Engine offloads shuffle/state off worker VMs and is the default for new streaming jobs — prefer it unless classic execution is specifically required",
+      "CoGroupByKey correlates two keyed PCollections in one step; per-key state via timers must have explicit bounds/expiry",
+      "Flex Templates support custom containers and dynamic pipeline construction where classic templates can't",
+      "Minimize shuffles (join, group-by) operations and monitor system lag; scale up if growing",
+      "Check regional Compute Engine quotas (CPUs, IPs) in addition to max_num_workers — either one can silently cap autoscaling"
     ],
     externalLink: "https://cloud.google.com/dataflow/docs/guides/deploy-batch-pipeline"
   },
@@ -1625,12 +1812,35 @@ Cost Calculation Example:
   - Months 1-3: Standard = 3 × $2 = $6
   - Months 4-12: Nearline = 9 × $1 = $9
   - Years 2-10: Archive = 9 × 12 × $0.12 = $13
-  - Total: $28 (~88% savings vs. the $240 all-Standard baseline)`,
+  - Total: $28 (~88% savings vs. the $240 all-Standard baseline)
+
+Minimum Storage Duration and Early Deletion/Retrieval Fees:
+- Nearline, Coldline, and Archive each carry a minimum storage duration (30, 90, and 365 days respectively) — deleting or moving an object out of that class before its minimum elapses still bills as if it had stayed the full minimum, an "early deletion fee" trap.
+- These classes also charge a per-GB retrieval fee that increases from Nearline to Archive — a lifecycle rule that tiers data down aggressively but is then read back frequently can cost more in retrieval fees than it saved on storage; match the tier to true access frequency, not just data age.
+- Corollary: if the real retention need (e.g., 45 days) is shorter than a colder class's minimum storage duration (e.g., Coldline's 90 days), moving the data there before deletion doesn't save money — the early deletion fee can make it cost more than simply leaving it in a class whose minimum duration actually fits the retention window.
+
+Object Versioning and Holds:
+- Object Versioning retains prior versions when an object is overwritten or deleted, protecting against accidental loss at the cost of storing every retained version — pair it with a lifecycle rule that expires noncurrent versions after N days to bound the extra cost.
+- Retention policies and object holds (temporary or event-based) block deletion/overwrite for compliance reasons, overriding lifecycle deletion rules until released — a forgotten hold silently keeps billing storage indefinitely.
+
+Requester Pays:
+- Requester Pays shifts download/egress and request costs from the bucket owner to whoever issues the request — useful when publishing a dataset for external consumers without absorbing their access costs.
+
+File Format for Query Performance:
+- Columnar formats (Parquet, ORC) let BigQuery external tables and Dataproc/Spark jobs read only the referenced columns and skip row groups via embedded statistics, sharply reducing bytes read for analytical (wide-table, few-column) query patterns compared to row-based formats (CSV, JSON).
+- CSV/JSON remain reasonable for small files, streaming landing zones, or when a consuming system requires them, but avoid them as the long-term format for large, frequently-queried analytical datasets.
+
+Cloud Storage vs. Filestore vs. Persistent Disk:
+- Cloud Storage: object storage with no POSIX semantics, the right default for data lake/analytics input-output; requires a connector (e.g., Cloud Storage FUSE, with its own performance caveats) to appear as a mounted filesystem.
+- Filestore: managed NFS, POSIX-compliant — needed only when an application genuinely requires shared-filesystem semantics (file locking, directory operations) that object storage doesn't provide.
+- Persistent Disk: block storage attached to a VM (or shared read-only across a few VMs) for boot/data disks, not a multi-client shared analytics store.`,
     keyPoints: [
-      "Lifecycle policies provide 80-95% savings for compliance",
-      "Egress outside GCP costs $0.12/GB (keep data in cloud)",
-      "Delete unnecessary data aggressively",
-      "Archive for compliance; don't use Standard for 10-year holds"
+      "Lifecycle policies provide 80-95% savings for compliance; egress outside GCP costs $0.12/GB",
+      "Nearline/Coldline/Archive minimum storage durations (30/90/365 days) mean early deletion or early tier-out still bills the full minimum — match tier to the real retention window, not just data age",
+      "Retrieval fees rise from Nearline to Archive; aggressive tiering that's read back often can cost more than it saves",
+      "Object Versioning plus a noncurrent-version expiration rule bounds the cost of protecting against accidental overwrite/deletion; a forgotten retention hold silently keeps billing",
+      "Columnar formats (Parquet/ORC) cut bytes read for analytical queries versus CSV/JSON",
+      "Choose Filestore only for true POSIX shared-filesystem needs; Persistent Disk is single/limited-VM block storage, not a shared analytics store"
     ],
     externalLink: "https://cloud.google.com/storage/docs/best-practices-cost-optimization"
   },
@@ -1813,12 +2023,34 @@ Cost Estimation (billed by volume: $40/TiB, publish + each subscription's delive
 Optimization:
 - Batch publishing (100-500 messages per request) reduces API call overhead, not the billed data volume
 - Minimize the number of subscriptions on high-volume topics; each additional subscription re-bills the full delivery volume
-- Filter or reduce message size/redundant fields where possible, since cost scales with bytes, not message count`,
+- Filter or reduce message size/redundant fields where possible, since cost scales with bytes, not message count
+
+Delivery Semantics and Ordering:
+- Default delivery is at-least-once (duplicates possible on retry); enabling exactly-once delivery on a subscription (an opt-in per-subscription setting) lets Pub/Sub itself guarantee no duplicate delivery for successfully acknowledged messages, removing the need for a hand-built dedup table/cache in the subscriber.
+- Ordering keys deliver messages sharing the same key in publish order within a region, at some throughput cost versus unordered delivery — scope ordering keys to the subset of messages that truly require in-order processing (e.g., per-entity event sequences), since a single hot ordering key behaves like a one-partition bottleneck.
+
+Flow Control, Ack Deadline, and Batching:
+- Client-side flow control (maxOutstandingMessages/maxOutstandingBytes) bounds how many unacked messages a subscriber holds at once; too low stalls throughput even with service capacity to spare, too high risks memory pressure and redelivery if the ack deadline expires first.
+- Ack deadline should exceed realistic p99 processing time (or use automatic deadline extension in current client libraries) — a deadline that's routinely exceeded causes Pub/Sub to redeliver messages still genuinely being processed, inflating apparent duplicate load.
+- Publisher-side batching settings (max messages, max bytes, max latency) amortize per-publish-RPC overhead across many small messages, at the cost of added publish-side latency up to the configured max-latency window.
+
+Push vs. Pull:
+- Pull subscriptions give the subscriber full control over concurrency and flow control, scaling by adding more puller processes/threads.
+- Push subscriptions have Pub/Sub call an HTTPS endpoint directly; the receiving endpoint's own concurrency/autoscaling (e.g., Cloud Run max instances) becomes the throughput bound, and a slow or erroring endpoint triggers Pub/Sub's own retry backoff.
+
+Filtering and Dead-Lettering:
+- Subscription-level filters (on message attributes) let a subscriber receive only a relevant subset of a shared topic without extra topics or client-side discarding — see the dedicated schema/DLQ reference for validation and dead-letter queue configuration.
+
+Pub/Sub vs. Managed Kafka:
+- Pub/Sub is fully managed and serverless, priced per data volume, with no partitions/brokers to manage.
+- Google Cloud Managed Service for Apache Kafka provides real Kafka-protocol compatibility, needed when existing Kafka client code, ecosystem tooling, or partition semantics are a hard requirement — default to Pub/Sub for new GCP-native pipelines and reach for Managed Kafka specifically for that compatibility need.`,
     keyPoints: [
       "Plan for peak rate, not average (usually 2-4× higher)",
-      "No fixed official msg/sec ceiling per subscriber; scale via more subscriber processes and flow-control tuning",
-      "Billed by data volume ($40/TiB), with publish and each subscription's delivery billed separately",
-      "Fan-out (multiple subscriptions on one topic) multiplies cost; batching improves API efficiency but not billed volume"
+      "Billed by data volume ($40/TiB), with publish and each subscription's delivery billed separately; fan-out multiplies cost",
+      "Exactly-once delivery (opt-in per subscription) removes the need for hand-built dedup logic that at-least-once otherwise requires",
+      "Flow control and ack deadline must be tuned together — too-tight flow control stalls throughput, too-short a deadline causes false redelivery of messages still in flight",
+      "Ordering keys guarantee per-key in-order delivery at a throughput cost; scope them to messages that truly need it",
+      "Choose Managed Kafka over Pub/Sub specifically when Kafka protocol compatibility or existing Kafka tooling is required"
     ],
     externalLink: "https://cloud.google.com/pubsub/pricing"
   },
@@ -2023,6 +2255,55 @@ Advanced Configuration (startup script):
     externalLink: "https://cloud.google.com/dataproc/docs/concepts/configuring-clusters"
   },
   {
+    id: "dataproc-optimization",
+    title: "Dataproc: Autoscaling, Spark Tuning, and Cost/Operational Optimization",
+    category: "Dataproc",
+    content: `Techniques beyond basic cluster sizing: autoscaling policy design, Spark-level tuning, storage migration, and ongoing cost control.
+
+Cluster Type Choice:
+- A standard (persistent or ephemeral) cluster gives full control: custom init actions, custom images, and multi-job sequencing on one warm cluster.
+- Dataproc Serverless for Spark removes cluster management entirely for self-contained batch jobs (see the dedicated Dataproc Serverless reference for when to prefer it).
+- Workflow Templates spin up an ephemeral cluster, run an ordered sequence of jobs, then tear the cluster down automatically — the standard pattern for a repeated multi-job pipeline that doesn't need to stay warm between runs.
+
+Autoscaling with Secondary Workers:
+- Primary workers hold HDFS blocks and core cluster state — keep them on regular (non-preemptible) VMs.
+- Secondary workers are the pool an autoscaling policy grows and shrinks; put preemptible or Spot VMs only here, since they can be reclaimed without risking cluster-critical data.
+- Key policy parameters: minInstances/maxInstances bound the secondary pool size; scaleUpFactor/scaleDownFactor control how much of pending YARN memory demand converts into an instance-count change per step; a cooldown period prevents thrashing from rapid successive scale events.
+
+Graceful Decommissioning and Enhanced Flexibility Mode (EFM):
+- Scaling down a secondary worker mid-shuffle normally discards that worker's in-progress shuffle data, forcing the affected tasks to retry from scratch.
+- gracefulDecommissionTimeout gives a removed worker time to finish in-flight work before termination, and Enhanced Flexibility Mode goes further by rerouting shuffle data itself (to primary workers or a dedicated shuffle service) so it survives secondary-worker removal.
+- EFM matters specifically when autoscaling/preemptible secondary workers are combined with shuffle-heavy Spark jobs (large joins, wide group-bys) — without it, aggressive scale-down causes repeated task failures and retries that can cost more time than the autoscaling saved.
+
+Spark-Level Tuning:
+- Right-size spark.executor.memory/cores to the job's actual per-task footprint; over-large executors waste allocated YARN memory, over-small ones cause excessive task scheduling overhead.
+- Broadcast small join tables (roughly under a few hundred MB) with a broadcast hint to avoid a full shuffle join against a large table.
+- Tune spark.sql.shuffle.partitions to the data volume — too few partitions causes skew and out-of-memory tasks, too many adds scheduling overhead for little parallel benefit.
+- Use Kryo serialization (spark.serializer=org.apache.spark.serializer.KryoSerializer) for a smaller, faster serialized footprint than Java's default serializer.
+- Bucket large, frequently-joined tables on the join key to avoid repeated shuffles across multiple jobs, and cache/persist DataFrames that are reused across several actions to avoid recomputing them.
+
+HDFS to GCS Migration:
+- The Cloud Storage connector lets Spark/Hadoop jobs read and write gs:// paths directly, so anything that must outlive the cluster should target GCS rather than on-cluster (ephemeral) HDFS.
+- Use the connector's GCS-aware output committer rather than the classic rename-based commit protocol, which assumes a real filesystem's atomic rename and behaves slowly/inconsistently against object storage.
+
+Cost and Operational Controls:
+- Set an idle timeout (--max-idle) so a forgotten interactive cluster auto-deletes instead of billing indefinitely.
+- Prefer ephemeral, job-scoped clusters created per Workflow Template run over one long-lived shared cluster for intermittent workloads; reserve persistent clusters for near-continuous utilization where teardown/startup overhead would exceed the idle savings.
+
+Monitoring:
+- Enable the Spark History Server against a persistent GCS event-log location so finished jobs remain inspectable (stages, tasks, stragglers) after their ephemeral cluster is deleted.
+- Cloud Monitoring dashboards on YARN pending memory and per-node CPU/disk are the inputs that inform whether an autoscaling policy's thresholds need adjusting.`,
+    keyPoints: [
+      "Keep primary workers on regular VMs (they hold HDFS/state); put preemptible/Spot instances only in the secondary-worker autoscaling pool",
+      "Enhanced Flexibility Mode preserves in-flight shuffle data when scaling down secondary workers — needed for shuffle-heavy Spark jobs mixed with preemptibles",
+      "Broadcast small join tables, tune shuffle partitions, use Kryo serialization, and cache/bucket reused DataFrames to cut Spark job time",
+      "Target GCS via the Cloud Storage connector's committer for anything that must outlive the cluster, not on-cluster HDFS",
+      "Use idle-timeout auto-deletion or ephemeral per-job clusters via Workflow Templates instead of a long-lived shared cluster for intermittent workloads",
+      "Spark History Server against a GCS event-log path lets you debug a job after its ephemeral cluster is gone"
+    ],
+    externalLink: "https://cloud.google.com/dataproc/docs/concepts/configuring-clusters/autoscaling"
+  },
+  {
     id: "spanner-consistency",
     title: "Cloud Spanner: Strong External Consistency",
     category: "Spanner",
@@ -2143,11 +2424,26 @@ Database Optimization:
 Cost Optimization:
 - Minimum instance size is 100 PU (0.1 node, a fraction of $0.90/hr), but right-size to actual QPS needs rather than defaulting to a large instance
 - Multi-region costs more per PU provisioned due to cross-region replica overhead, not because of an artificial 5-node floor
-- Only use multi-region if you truly need cross-region reads with low latency and automatic regional failover`,
+- Only use multi-region if you truly need cross-region reads with low latency and automatic regional failover
+
+Autoscaling: Processing Units vs. Manual Node Provisioning:
+- Spanner's built-in autoscaler adjusts compute capacity (processing units) between a configured minimum and maximum based on CPU utilization and storage targets, instead of an operator manually resizing nodes for daily/weekly load swings.
+- Manual provisioning still fits very predictable, flat workloads where autoscaling's reaction time doesn't matter; autoscaling is preferred whenever load has meaningful peaks/troughs (daily batch spikes, business-hours traffic), since it avoids paying for permanently-provisioned peak capacity around the clock.
+
+Transaction Types and Staleness:
+- Read-write transactions use locking and are the only type that can mutate data; keep them short, since held locks block other transactions on overlapping rows.
+- Read-only transactions avoid locking entirely and run at a consistent timestamp; strong reads (default) read the latest committed data, while bounded or exact staleness reads (accepting a specified lag, e.g., 15 seconds) can be served from any sufficiently up-to-date replica, reducing latency and leader load.
+- Rule of thumb: route latency-sensitive or freshness-tolerant read traffic (dashboards, reports, cross-region reads) through bounded-staleness reads, and reserve strong reads/read-write transactions for the operational path that must see the latest committed state.
+
+Secondary Indexes (expanded):
+- A secondary index maintains a second sorted copy of the indexed columns (plus any STORING columns); queries filtering/sorting on the indexed column avoid a full base-table scan, but every additional index adds write amplification since each write updates every index on that table.
+- Interleaved secondary indexes co-locate index entries with their base table split, reducing splits touched per query — worth using when the index is heavily read alongside its base row. For combining interleaved tables and key distribution in full schema design, see the dedicated Spanner schema design reference.`,
     keyPoints: [
       "Linear scaling: ~10,000 reads QPS or ~2,000 writes QPS per node (1 KB rows), scales linearly with nodes/PUs added",
       "Minimum compute capacity is 100 processing units (0.1 node) — there is no fixed 3-node or 5-node purchase minimum",
-      "Compute cost is ~$0.90/node/hour regardless of regional vs. multi-region configuration",
+      "Spanner's built-in autoscaler adjusts processing units automatically between min/max based on CPU/storage targets — prefer it over manual resizing for peaky workloads",
+      "Bounded/exact staleness reads reduce latency and leader load for read-heavy, freshness-tolerant workloads; read-write transactions should stay short",
+      "Every secondary index adds write amplification — add only indexes that pay for themselves in avoided scans",
       "Key design critical: Avoid sequential keys (create hotspots)"
     ],
     externalLink: "https://cloud.google.com/spanner/docs/instances"
@@ -2859,8 +3155,57 @@ Design Guidance:
     externalLink: "https://cloud.google.com/bigtable/docs/overview"
   },
   {
+    id: "bigtable-optimization",
+    title: "Bigtable: Capacity Planning, Access Patterns, and Operational Optimization",
+    category: "Bigtable",
+    content: `Optimization techniques beyond row-key design: capacity, monitoring, batching, replication, and API/tooling split.
+
+Capacity and Node Sizing:
+- Throughput per SSD node is an order-of-magnitude planning figure, not a fixed guarantee — real throughput depends heavily on row size and access pattern (point read vs. scan vs. write mix).
+- The practical sizing method is to load-test the real workload and scale nodes to keep per-node CPU utilization around a 70% target (Google's recommended operating ceiling), rather than deriving a node count from a single generic formula.
+- Storage per node also has practical ceilings depending on SSD vs. HDD; a cluster that's storage-bound needs more nodes even if CPU utilization looks fine.
+
+Detecting Hotspots:
+- Cloud Monitoring exposes per-node CPU and request metrics, showing whether load is skewed toward one node.
+- Key Visualizer renders a heatmap of row-key access over time, making a hot key range visually obvious instead of requiring manual log correlation — the fastest way to confirm a suspected hotspot before redesigning row keys.
+
+Scans vs. Point Reads:
+- A point read (a single row by its full key) is the cheapest, most predictable operation.
+- A prefix or range scan reads a contiguous key range and costs proportionally more; design row keys so the common query pattern is a point read or a scan over a small, well-bounded prefix range — never a full-table scan with a post-hoc filter.
+
+Batching:
+- Client libraries support batched reads and batched mutations, amortizing per-RPC overhead across many rows.
+- Batching is the standard technique for bulk load or bulk read workloads, versus issuing one RPC per row, which multiplies per-row network/serialization overhead.
+
+Column Families, GC Policies, and Capacity:
+- Each column family's garbage-collection policy (max age, max versions, or a combination) controls how old cell versions are reclaimed; a family that never needs history should set max versions=1 to bound storage and read amplification.
+- Fewer, well-chosen families that group columns by shared access pattern and lifecycle keep both storage and per-read data volume down (see the row-key design reference for the related family-grouping guidance).
+
+Replication:
+- An instance can replicate across clusters in multiple regions/zones, with single-cluster or multi-cluster (health-based failover) routing.
+- Replication improves read availability and latency, and supports disaster recovery, but writes propagate with replication lag (typically sub-second to a few seconds) — don't assume strict cross-region read-after-write consistency.
+
+cbt CLI and Admin vs. Data API:
+- The cbt command-line tool and the Bigtable Admin API manage schema (tables, column families, GC policies) and instance/cluster topology (node counts, replication).
+- The Data API (via client libraries) handles the actual reads/writes/scans — automating schema/topology changes is a distinct concern from automating data operations.
+
+Bigtable vs. Spanner vs. Datastore/Firestore (the capacity/latency angle):
+- Choose Bigtable when throughput and latency at massive single-key-access scale matter more than transactions, joins, or secondary indexes.
+- Choose Spanner when the workload needs multi-row ACID transactions, SQL, or global strong consistency.
+- Choose Firestore/Datastore for smaller-scale, document-shaped, offline-sync-friendly workloads where Bigtable's schema/GC management overhead isn't justified.`,
+    keyPoints: [
+      "Size nodes by load-testing toward a ~70% CPU utilization target, not a single fixed throughput formula",
+      "Key Visualizer renders a row-key access heatmap — the fastest way to visually confirm a hotspot",
+      "Point reads and small-prefix scans are cheap and predictable; full-table scans with a filter are not",
+      "Batch reads/mutations to amortize per-RPC overhead instead of one RPC per row",
+      "Column-family GC policies (max age/versions) directly control storage and read amplification",
+      "Multi-cluster replication improves availability/DR but has replication lag — don't assume immediate cross-region read-after-write consistency"
+    ],
+    externalLink: "https://cloud.google.com/bigtable/docs/performance"
+  },
+  {
     id: "composer-orchestration",
-    title: "Cloud Composer for Multi-System Batch Orchestration",
+    title: "Cloud Composer: Orchestration Fit and Airflow Tuning",
     category: "Orchestration",
     content: `Cloud Composer is managed Apache Airflow, used to orchestrate dependencies between heterogeneous data jobs.
 
@@ -2880,15 +3225,33 @@ When to Choose Something Else:
 - Dataform: orchestration scoped to SQL/BigQuery-native transformations only, not external compute jobs
 - Cloud Scheduler: fire-and-forget triggering with no dependency tracking between the jobs it triggers
 
+Airflow Tuning Parameters:
+- Scheduler count: Composer 2 supports running multiple scheduler replicas. Tasks stuck in "queued" for a long time despite workers sitting idle is the classic symptom of too few schedulers (or a single scheduler saturated parsing too many DAGs) — scale schedulers before scaling worker compute for that specific symptom.
+- Worker/queue sizing: the worker pool size and the executor's per-worker concurrency setting bound how many tasks can actually run in parallel across the environment.
+- Parallelism knobs are distinct ceilings that can each bottleneck independently: core.parallelism (environment-wide max running task instances), max_active_tasks_per_dag (per-DAG concurrency), and max_active_runs (concurrent DAG run instances) — a bottleneck at any one of them looks like "tasks not starting" even when the others have headroom.
+- Retries/backoff/SLAs: per-task retries with exponential backoff absorb transient failures (a brief API hiccup, a momentary quota bump) without failing the whole DAG; an SLA defines an expected task duration and triggers alerting on overrun — it does not itself retry anything.
+
+DAG Design Best Practices:
+- Idempotence: re-running a task (via retry or manual backfill) must produce the same end state rather than duplicating rows — e.g., use MERGE or overwrite-partition patterns in a BigQuery load task rather than a blind INSERT.
+- Atomic tasks: each task should be one discrete, retryable unit of work with a clear success/failure boundary, rather than one large multi-step script where a retry redoes everything.
+- Minimal XCom usage: XCom is for small metadata passed between tasks (a job ID, a file path), not for passing large datasets through Airflow's own metadata database — large data should flow through GCS/BigQuery, with only a reference passed via XCom.
+- Dynamic DAG generation vs. one large single DAG: generating many similar DAGs from a config/loop (e.g., one per source table) scales better operationally — independent scheduling and isolated failures — than a single monolithic DAG encoding every source as an internal branch, which becomes one slow-to-parse point of failure.
+
+Triggers, Sensors, and Dataflow Operators:
+- Prefer deferrable sensors (or reschedule mode) over classic poking sensors for long waits — a classic sensor occupies a worker slot for the entire wait, while a deferrable sensor releases the worker between checks.
+- Built-in operators for Dataflow (e.g., launching and monitoring a Beam pipeline or a Flex Template job) integrate with Airflow's own retry/SLA model instead of requiring hand-rolled polling logic.
+
 Cost and Operational Notes:
 - Composer runs a persistent GKE-based environment, so there's a baseline cost even when no DAGs are running
 - Composer 2 supports autoscaling workers, reducing (but not eliminating) idle cost
-- Right-size environment size to DAG complexity and concurrency needs, not to peak job compute (Composer schedules and monitors; the actual heavy compute runs in Dataflow/Dataproc/BigQuery)`,
+- Right-size environment size (and scheduler/worker counts) to DAG complexity and concurrency needs, not to peak job compute (Composer schedules and monitors; the actual heavy compute runs in Dataflow/Dataproc/BigQuery)`,
     keyPoints: [
       "Composer/Airflow fits multi-system DAGs needing dependencies, sensors, retries, and backfill",
-      "Cloud Workflows suits lighter orchestration of a handful of API calls, but lacks native backfill",
-      "Dataform orchestrates BigQuery SQL transformations only, not external Dataflow/Dataproc jobs",
-      "Composer has a persistent baseline cost since it runs on a managed GKE environment"
+      "Tasks stuck in 'queued' with idle workers points to too few schedulers or scheduler saturation, not insufficient worker compute",
+      "core.parallelism, max_active_tasks_per_dag, and max_active_runs are independent ceilings — any one can bottleneck while the others have headroom",
+      "DAG tasks should be idempotent and atomic; keep large data out of XCom, passing only references",
+      "Prefer deferrable sensors over classic poking sensors for long waits, to avoid tying up a worker slot",
+      "Cloud Workflows suits lighter orchestration of a handful of API calls, but lacks native backfill; Dataform orchestrates BigQuery SQL only"
     ],
     externalLink: "https://cloud.google.com/composer/docs/concepts/overview"
   },
@@ -2983,12 +3346,23 @@ Common Mistake:
 
 Cost Pattern:
 - Online endpoint: continuous cost proportional to provisioned nodes/hours, regardless of traffic
-- Batch Prediction: cost proportional to the actual scoring job's compute time, nothing between runs`,
+- Batch Prediction: cost proportional to the actual scoring job's compute time, nothing between runs
+
+Training Resource and Budget Choices:
+- AutoML training budgets (specified in node-hours) trade budget for model quality only up to a point of diminishing returns — training stops early if additional budget stops improving validation performance, so an excessive budget on a simple dataset just wastes spend without a quality gain.
+- Custom training machine/accelerator selection should match the model's actual bottleneck: CPU-bound classical ML fits standard machine types, while large deep-learning training benefits from GPUs/TPUs only up to the point the training code can actually parallelize across them — over-provisioning accelerators for code that can't use them wastes accelerator-hour cost.
+- Hyperparameter tuning jobs run many trials, optionally in parallel; more parallel trials finish sooner but cost proportionally more compute, and a focused search space (Bayesian optimization, sensible parameter ranges) reaches a good result in fewer total trials than a wide, unfocused grid search.
+
+Cross-References for the Rest of the ML Lifecycle:
+- Online serving at scale and training/serving feature skew are covered in the Feature Store reference; drift/skew monitoring for a deployed model is covered in the Model Monitoring reference; versioning and promoting models between environments is covered in the Model Registry/Pipelines reference; preparing unstructured data for retrieval is covered in the embeddings/RAG reference.
+- Vertex AI Pipelines orchestrate the full sequence (data prep → training → evaluation → conditional deployment) as a reusable, versioned DAG, so a repeated retraining workflow doesn't depend on manually re-running notebook cells in order.`,
     keyPoints: [
       "Custom training gives architecture control that AutoML does not",
       "Online endpoints suit low-latency request/response and bill continuously for provisioned nodes",
       "Batch Prediction suits large offline scoring jobs and only bills for the run itself",
-      "Looping requests into an online endpoint for a bulk job wastes cost versus using Batch Prediction"
+      "AutoML training budgets show diminishing returns past a point — more budget doesn't guarantee proportionally better models",
+      "Match accelerator choice to what the training code can actually parallelize; over-provisioning GPUs/TPUs wastes cost",
+      "Hyperparameter tuning cost scales with parallel trials — a focused search space beats a wide grid search on total cost"
     ],
     externalLink: "https://cloud.google.com/vertex-ai/docs/predictions/batch-predictions"
   },
@@ -3283,12 +3657,35 @@ Federated Governance Model:
 
 When to Reach for Dataplex vs. Alternatives:
 - Need to organize/govern data already spread across many BigQuery datasets and GCS buckets without a physical migration → Dataplex
-- Need to externally publish curated data to other teams/partners → Analytics Hub (a different, complementary concern: sharing, not internal organization)`,
+- Need to externally publish curated data to other teams/partners → Analytics Hub (a different, complementary concern: sharing, not internal organization)
+
+BigLake Tables:
+- A BigLake table is a BigQuery table definition over data that physically lives in Cloud Storage (or another cloud, via BigQuery Omni), enforcing the same fine-grained row/column-level access control as a native BigQuery table regardless of which engine reads it (BigQuery, or Spark via the BigLake connector) — closing the gap where plain external tables could bypass BigQuery's access controls when read by another engine.
+- Dataplex can attach BigLake tables as assets within a lake/zone, combining Dataplex's organizational/governance layer with BigLake's enforced access control over the underlying files.
+
+Dataplex Metastore:
+- A managed, Hive-metastore-compatible metadata service so open-source engines (Spark, Hive, Presto/Trino) and BigQuery share one consistent view of table schemas/partitions over the same Cloud Storage data, instead of each engine maintaining its own disconnected metastore.
+
+Tags and Policy Tags:
+- Dataplex Catalog lets you attach business metadata (tags — e.g., "PII," "finance-owned," a data-quality score) to tables/columns for discovery and classification.
+- Policy tags enforce access control at the column level (e.g., only a compliance group can read a column tagged "SSN"), independent of who has table-level access, and compose with row-level security policies.
+
+Lineage:
+- Automatically captured lineage (which jobs/queries read which tables and wrote which outputs) is exposed through Dataplex/Data Catalog for impact analysis ("what breaks if I change this table's schema") and audit — see the dedicated Data Catalog/lineage reference for details.
+
+Choosing Among Dataplex, BigLake, Analytics Hub, and BigQuery Omni (they compose, not compete):
+- Dataplex organizes and governs data already spread across many BigQuery datasets and GCS buckets (discovery, quality, federated policy) without moving it.
+- BigLake enforces consistent fine-grained access control on external-storage tables regardless of the query engine reading them — the mechanism Dataplex and Omni both rely on for governed external access.
+- BigQuery Omni runs the BigQuery engine inside AWS/Azure to query S3/Blob data in place (via BigLake tables), avoiding cross-cloud copy (see the dedicated Omni/Analytics Hub reference).
+- Analytics Hub publishes curated, access-controlled datasets/views as listings for other teams or external partners to subscribe to, without copying data or sharing credentials.
+- A typical combined flow: Dataplex organizes and applies quality rules to zones containing BigLake tables (governed access over GCS or, via Omni, other-cloud data), and the curated result is then published through Analytics Hub.`,
     keyPoints: [
       "Lakes and zones logically organize existing BigQuery/GCS assets without moving data",
       "Provides unified discovery, access policy, data-quality, and profiling at the zone level",
       "Enables federated governance: central baseline policy, domain teams retain ownership within their zone",
-      "Distinct from Analytics Hub, which handles external, curated data sharing rather than internal organization"
+      "BigLake enforces consistent row/column-level access control over external-storage tables regardless of the reading engine",
+      "Dataplex Metastore gives Spark/Hive/BigQuery one shared metadata view over the same GCS data; policy tags enforce column-level access independent of table-level grants",
+      "Dataplex, BigLake, Omni, and Analytics Hub compose together rather than being mutually exclusive choices"
     ],
     externalLink: "https://cloud.google.com/dataplex/docs/introduction"
   },
