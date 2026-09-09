@@ -318,6 +318,186 @@ export const quizQuestions: QuizQuestion[] = [
     explanation: "One million messages per day averages roughly 11 per second, which a request-driven stack handles easily and far more cheaply. What you lose is Dataflow's streaming model: event-time windowing, stateful aggregation, watermarks and late data handling, exactly-once sink semantics, and automatic backpressure. If the workload is stateless per-message processing, the migration is sound; if it aggregates over time windows, it is not.",
     bestPractice: "Choose by workload shape, not headline price. Stateless per-event work suits Cloud Run and Cloud Tasks; windowed, stateful, or ordering-sensitive streaming belongs in Dataflow.",
     references: ["service-selection", "dataflow-streaming"]
+  },
+  {
+    id: 21,
+    question: "You store IoT telemetry in Bigtable with row key format `<timestamp>#<device_id>` so recent readings are easy to scan. With 2 million devices producing a combined 50,000 writes/sec, monitoring shows one tablet server absorbing nearly all write traffic while the rest sit idle. What row key change fixes this?",
+    topic: "Bigtable",
+    difficulty: "hard",
+    options: [
+      { text: "Add more nodes to the cluster so load spreads across more tablet servers", correct: false },
+      { text: "Swap the key order to `<device_id>#<reversed_timestamp>`, so writes distribute across the spread of device_id values while keeping recent-first ordering per device", correct: true },
+      { text: "Merge all columns into a single column family to reduce per-write I/O overhead", correct: false },
+      { text: "Add a secondary index on device_id so lookups don't rely on the row key prefix", correct: false }
+    ],
+    explanation: "Bigtable row keys are stored in lexicographic order and sharded into contiguous key ranges (tablets). Leading the key with a timestamp means nearly every concurrent write shares an almost-identical, always-increasing prefix, so they all land in the same tablet range — a classic hotspot. Prefixing with a high-cardinality, evenly distributed field like device_id spreads writes across tablets; inverting the timestamp keeps per-device reads recent-first without leading with a monotonic value. Adding nodes doesn't help because tablet assignment is key-range based, not round-robin, and Bigtable has no secondary indexes.",
+    bestPractice: "Never lead a Bigtable row key with a monotonically increasing value (timestamp, auto-increment ID); prefix with a well-distributed field and invert time components only as a suffix.",
+    references: ["bigtable-rowkey-design"]
+  },
+  {
+    id: 22,
+    question: "A gaming backend stores per-player state (health, position, inventory) for 5 million concurrent players, with a combined peak of 200,000 single-row writes/sec and reads by player_id requiring single-digit-millisecond latency. There are no SQL joins, no multi-row transactions, and no analytical queries against this data. Which design best fits?",
+    topic: "Bigtable",
+    difficulty: "medium",
+    options: [
+      { text: "Cloud Spanner, with a single table and a global secondary index on player_id", correct: false },
+      { text: "Bigtable, one row per player, with column families grouping related attributes (e.g., 'state', 'inventory') for efficient partial reads", correct: true },
+      { text: "Firestore in Datastore mode, relying on automatic scaling to absorb the write rate", correct: false },
+      { text: "BigQuery with streaming inserts, queried by player_id for each request", correct: false }
+    ],
+    explanation: "Bigtable is purpose-built for exactly this profile: massive single-key point lookups/writes at sub-10ms latency with linear scaling by adding nodes. Grouping related columns into column families lets a read of the 'state' family skip unrelated 'inventory' columns, cutting I/O. Spanner's relational engine and global consistency add cost and latency this workload doesn't need since there are no joins or multi-row transactions. Firestore's practical sustained throughput per database is well below 200,000 writes/sec. BigQuery is a columnar analytical warehouse, not a low-latency point-lookup serving layer.",
+    bestPractice: "Use Bigtable for high-throughput single-key serving workloads, and design column families around which columns are read or written together to avoid pulling unrelated data on every request.",
+    references: ["bigtable-service-selection", "service-selection"]
+  },
+  {
+    id: 23,
+    question: "Your nightly workflow must: (1) trigger a Dataflow batch job to transform raw logs, (2) wait for it to finish, (3) load results via a Dataproc Spark job, then (4) run downstream SQL transformations — with per-step retries, failure alerting, and the ability to backfill any single past day on demand. Which orchestration approach fits best?",
+    topic: "Cloud Composer",
+    difficulty: "medium",
+    options: [
+      { text: "Cloud Composer (managed Airflow), modeling the steps as a DAG with task dependencies, sensors, and per-task retry policies", correct: true },
+      { text: "Cloud Scheduler triggering each job independently via Pub/Sub, with no cross-step dependency tracking", correct: false },
+      { text: "Dataform alone, since it can also launch and monitor Dataflow and Dataproc jobs", correct: false },
+      { text: "Cloud Workflows, since it avoids the operational overhead of running a Composer environment", correct: false }
+    ],
+    explanation: "Composer is the standard fit for complex, multi-system batch DAGs: it models task dependencies explicitly, provides sensors to wait on external job completion, per-task retry policies, a monitoring UI, and built-in backfill for arbitrary past execution dates. Cloud Scheduler firing jobs independently has no concept of 'wait for step 1 before step 2.' Dataform only orchestrates SQL/BigQuery-native transformations, not general Dataflow or Dataproc jobs. Cloud Workflows is a valid lightweight serverless orchestrator for a handful of API calls, but it lacks native backfill and the rich sensor/retry/DAG-visualization ecosystem needed for a multi-system nightly pipeline like this.",
+    bestPractice: "Reach for Composer/Airflow when a pipeline spans multiple compute systems and needs sensors, retries, and backfill; reserve Cloud Workflows for simpler sequential orchestration of a few service calls.",
+    references: ["composer-orchestration", "dataform-elt"]
+  },
+  {
+    id: 24,
+    question: "Your organization has 200+ BigQuery datasets across 15 teams. Auditors need to answer 'which pipeline produced this table, and what upstream sources feed it' within minutes, and data stewards need to tag PII columns for governance without editing every ETL job. Which approach satisfies both needs?",
+    topic: "Data Catalog & Lineage",
+    difficulty: "medium",
+    options: [
+      { text: "Dataplex/Data Catalog for searchable metadata and column-level PII tagging, combined with automatic lineage tracking across BigQuery, Dataflow, and Composer-orchestrated pipelines", correct: true },
+      { text: "INFORMATION_SCHEMA queries against BigQuery job history, since it contains full cross-system lineage", correct: false },
+      { text: "A manually maintained spreadsheet mapping table owners and upstream sources, updated whenever a pipeline changes", correct: false },
+      { text: "Cloud Audit Logs Data Access logs, since they record every table read and write", correct: false }
+    ],
+    explanation: "Dataplex, which incorporates Data Catalog, provides a governed metadata layer with searchable tags (including policy tags for column-level PII that integrate with BigQuery access controls) and automatic lineage capture for supported GCP sources, showing upstream/downstream relationships without touching pipeline code. INFORMATION_SCHEMA exposes query-level job metadata within BigQuery only, not a cross-system lineage graph or a tagging mechanism. Manual spreadsheets don't scale and drift stale immediately. Audit logs record access events, not structural derivation lineage or governance tags.",
+    bestPractice: "Enable Dataplex/Data Catalog lineage and apply column-level policy tags for PII so governance is enforced by BigQuery access controls, not just documented.",
+    references: ["data-catalog-lineage"]
+  },
+  {
+    id: 25,
+    question: "A fraud-detection model is trained daily in BigQuery ML using rolling 30-day aggregate features. The real-time scoring API recomputes the same aggregates on the fly to score transactions in under 50ms, and your team has traced recurring accuracy drops to the online and offline feature values diverging. What is the recommended fix using Vertex AI?",
+    topic: "Vertex AI",
+    difficulty: "hard",
+    options: [
+      { text: "Precompute the features once and publish them to Vertex AI Feature Store, so both training and low-latency online serving read identical feature values from a shared store", correct: true },
+      { text: "Move all feature computation into the serving API and cache results in Memorystore per request", correct: false },
+      { text: "Retrain the model every 5 minutes so features are always maximally fresh", correct: false },
+      { text: "Serve predictions directly from BigQuery ML using streaming inserts for the online path", correct: false }
+    ],
+    explanation: "Vertex AI Feature Store centralizes feature computation: an offline store serves point-in-time-correct historical values for training, and an online store serves the identical precomputed values with low latency for real-time scoring. This eliminates training/serving skew caused by two separate code paths computing 'the same' aggregate differently. Recomputing in the serving API duplicates and risks diverging from the training logic. More frequent retraining doesn't address a feature-computation mismatch. BigQuery is not designed to deliver consistent sub-50ms single-row serving latency.",
+    bestPractice: "Compute each feature once, register it in Vertex AI Feature Store, and serve the same values to both training and online inference to remove skew and meet latency SLAs.",
+    references: ["vertex-ai-feature-store"]
+  },
+  {
+    id: 26,
+    question: "You must classify 10 million product images into 500 categories. In-house ML engineers require full control over model architecture (a custom PyTorch model trained on A100 GPUs), and the only inference need is a nightly batch scoring run over 5 million new images — no real-time serving. What is the most cost-effective Vertex AI approach?",
+    topic: "Vertex AI",
+    difficulty: "hard",
+    options: [
+      { text: "Vertex AI custom training on A100 GPUs, then Vertex AI Batch Prediction to score images nightly, with no persistently deployed endpoint", correct: true },
+      { text: "Vertex AI AutoML Image Classification, since it removes infrastructure management and always outperforms hand-built models", correct: false },
+      { text: "Deploy the trained model to a Vertex AI online endpoint with autoscaling, and invoke it 5 million times each night in a loop", correct: false },
+      { text: "Train on a Vertex AI Workbench notebook instance kept running continuously, then export the model to Cloud Run for inference", correct: false }
+    ],
+    explanation: "Custom training gives the architecture control the team explicitly wants (AutoML forecloses that, and doesn't guarantee outperforming a purpose-built model). Vertex AI Batch Prediction reads directly from Cloud Storage/BigQuery, scales out across distributed workers, and only incurs cost during the run. An online endpoint bills for provisioned serving nodes continuously and is built for low-latency request/response, not for grinding through 5 million images as one nightly batch. A permanently running notebook plus Cloud Run adds idle notebook cost and isn't optimized for GPU batch throughput at this scale.",
+    bestPractice: "Match the Vertex AI serving mode to the access pattern: online endpoints for low-latency request/response, batch prediction for large offline scoring jobs, so you never pay for idle serving capacity.",
+    references: ["vertex-ai-training-deployment"]
+  },
+  {
+    id: 27,
+    question: "A team currently uses Dataflow to extract, transform, and load data into BigQuery, but every transformation is pure SQL — joins, window functions, aggregations, no external API calls or non-SQL logic. Stakeholders now want version-controlled SQL, an automatic dependency graph, and built-in data quality tests. What architecture change is recommended?",
+    topic: "Dataform",
+    difficulty: "medium",
+    options: [
+      { text: "Load raw data into BigQuery with simple load jobs (EL), then use Dataform to run in-warehouse SQL transformations (T) with automatic dependency management and built-in assertions", correct: true },
+      { text: "Keep Dataflow, since only Beam pipelines support production-grade retries", correct: false },
+      { text: "Move the transformations into Cloud Composer PythonOperators executing raw SQL strings", correct: false },
+      { text: "Replace the pipeline with Cloud Data Fusion for a no-code visual ETL pipeline", correct: false }
+    ],
+    explanation: "When every transformation is expressible in SQL against data already destined for BigQuery, ELT with Dataform fits better than Dataflow: it version-controls SQL, builds a dependency DAG automatically from ref() calls between models, and supports built-in assertions (uniqueness, not-null, custom checks) — exactly what's being requested. Dataflow adds unneeded operational cost for logic with no streaming, no external calls, and no non-SQL processing. Composer PythonOperators would require rebuilding dependency tracking and testing that Dataform already provides. Data Fusion targets no-code visual pipelines across heterogeneous sources, not lightweight in-warehouse SQL transformation with native testing.",
+    bestPractice: "Use ELT with Dataform for pure SQL, in-warehouse BigQuery transformations that need dependency graphs and tests; keep Dataflow for logic that genuinely requires non-SQL processing, streaming, or work before data lands in the warehouse.",
+    references: ["dataform-elt", "warehouse-design"]
+  },
+  {
+    id: 28,
+    question: "A Dataflow streaming pipeline aggregates revenue per 1-minute tumbling window from Pub/Sub and writes results to BigQuery. About 8% of mobile events arrive 2-5 minutes late. `allowedLateness` is currently 0, so late revenue is silently dropped. The business accepts a corrected total up to 10 minutes after window close but will not tolerate duplicate rows per window in BigQuery. What configuration achieves this?",
+    topic: "Dataflow",
+    difficulty: "hard",
+    options: [
+      { text: "Set allowedLateness to 10 minutes with accumulating trigger mode, and write to BigQuery via MERGE/UPSERT keyed by window start/end rather than plain append-only INSERT", correct: true },
+      { text: "Set allowedLateness to 10 minutes, keep discarding mode, and use a plain streaming INSERT, relying on BigQuery to deduplicate matching rows", correct: false },
+      { text: "Increase the window size to 15 minutes so the 2-5 minute late data always arrives before the window closes", correct: false },
+      { text: "Set the watermark hold duration to 0 so late data bypasses the trigger and is processed immediately", correct: false }
+    ],
+    explanation: "With allowedLateness=10m and accumulating mode, Dataflow re-emits the full corrected total for a window (not just the delta) whenever late data arrives inside that window. Writing that corrected pane via MERGE/UPSERT keyed on the window boundaries replaces the prior row instead of appending a duplicate. Discarding mode only emits the incremental delta since the last pane, so it cannot produce a standalone corrected total, and BigQuery does not auto-deduplicate streamed rows. Widening the window doesn't guarantee arrival before close and adds latency to the 92% of on-time data. There is no watermark setting that bypasses triggering — the watermark is what triggers emission in the first place.",
+    bestPractice: "For eventually-correct streaming aggregates, pair accumulating mode and allowedLateness with a MERGE/UPSERT sink keyed by window, never an append-only insert.",
+    references: ["dataflow-windowing", "dataflow-triggers", "dataflow-exactly-once-watermarks"]
+  },
+  {
+    id: 29,
+    question: "A shared Pub/Sub topic ingests order events at 20,000 msg/sec from 40 microservices owned by different teams. A bad deploy from one producer team published malformed JSON, which repeatedly crashed 3 downstream Dataflow consumers until they were manually paused, causing a 45-minute outage. You must prevent one team's payload mistake from taking down shared consumers again, while remaining on Pub/Sub. What change addresses this most directly?",
+    topic: "Pub/Sub",
+    difficulty: "hard",
+    options: [
+      { text: "Enforce a Pub/Sub schema (Avro/Protobuf) on the topic to reject non-conforming messages at publish time, and configure each subscription's dead-letter policy to route unprocessable messages to a DLQ topic after a bounded number of delivery attempts", correct: true },
+      { text: "Migrate to Google Cloud Managed Service for Apache Kafka, since Kafka natively prevents malformed messages from being published", correct: false },
+      { text: "Increase each subscription's ack deadline so consumers have more time to process malformed messages", correct: false },
+      { text: "Increase the subscription's message retention to 7 days so bad messages can be reprocessed later", correct: false }
+    ],
+    explanation: "A Pub/Sub schema rejects messages that don't conform to a registered Avro/Protobuf definition at publish time, stopping malformed payloads before any subscription ever sees them. A dead-letter policy then guarantees that any message a subscriber still can't process after a configured max delivery attempts is moved to a separate DLQ topic instead of being redelivered forever, which is exactly what caused the crash loop. Kafka doesn't solve this for free either — it needs an equivalent schema registry and dead-letter handling configured, and migrating doesn't address the immediate need to stay on Pub/Sub. Ack deadline governs processing time, not payload validity, and retention only affects how long messages remain available, not whether a crash loop occurs.",
+    bestPractice: "Attach a schema to every shared Pub/Sub topic and configure a dead-letter topic with bounded max delivery attempts on every subscription, so bad payloads are rejected upfront and any message that still fails is quarantined rather than retried indefinitely.",
+    references: ["pubsub-schema-dlq", "pubsub-quota"]
+  },
+  {
+    id: 30,
+    question: "An analyst ran an UPDATE with an unintended tautological WHERE clause 3 hours ago, overwriting all 400 million rows of an orders table. There is no explicit backup of this table. What is the fastest recovery option, and how long does it remain available by default if you take no special action?",
+    topic: "BigQuery",
+    difficulty: "medium",
+    options: [
+      { text: "Query the table with time travel (FOR SYSTEM_TIME AS OF) to read the pre-update state and restore it; time travel is available for up to 7 days by default", correct: true },
+      { text: "Use fail-safe to instantly and directly query the pre-update rows; fail-safe is queryable for 7 days after time travel expires", correct: false },
+      { text: "Recovery is impossible, since BigQuery does not retain historical row versions once a DML statement commits", correct: false },
+      { text: "Restore from the nightly Cloud Storage export, accepting up to 24 hours of data loss", correct: false }
+    ],
+    explanation: "BigQuery retains historical table versions for time travel (default 7 days, configurable 2-7 days per dataset), so `SELECT * FROM orders FOR SYSTEM_TIME AS OF TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 3 HOUR)` can read the pre-update rows and be used to recreate the table with zero data loss. Fail-safe is a subsequent, non-queryable retention period intended only for Google-assisted recovery after time travel expires — you cannot self-service query it. Historical versions do exist, so recovery is possible. Restoring from a nightly export would work but loses more data and is slower than the precise point-in-time recovery time travel provides.",
+    bestPractice: "Use time travel for self-service point-in-time recovery within the retention window, and take an explicit table snapshot before running risky multi-statement scripts or bulk DML for a longer-lived, cheap restore point.",
+    references: ["bq-scripting-procedures"]
+  },
+  {
+    id: 31,
+    question: "Your company holds 200 TB of order events in AWS S3 and 50 TB already in BigQuery on GCP. Analysts need to run federated SQL joins across both without duplicating the S3 data into GCP, while minimizing cross-cloud egress. Governance also requires exposing a curated, access-controlled version of the combined data to a partner company without granting them direct access to your GCP project. Which combination fits?",
+    topic: "BigQuery",
+    difficulty: "hard",
+    options: [
+      { text: "BigQuery Omni to query the S3 data in place via BigLake tables (compute runs in AWS, avoiding egress for the query itself), then publish the curated result as a listing via Analytics Hub for the partner", correct: true },
+      { text: "Copy all 200 TB from S3 to Cloud Storage, load it into native BigQuery tables, and share a service account key with the partner for direct table access", correct: false },
+      { text: "Use BigQuery's EXTERNAL_QUERY function to query the S3 objects directly, since BigQuery can natively query any cloud object store without additional setup", correct: false },
+      { text: "Set up Analytics Hub only, since it can execute cross-cloud queries natively without Omni or BigLake", correct: false }
+    ],
+    explanation: "BigQuery Omni runs the BigQuery engine in the source cloud region and queries S3 data in place through BigLake tables, avoiding both data duplication and egress for the query. Analytics Hub then publishes curated views as a data exchange listing that the partner subscribes to with controlled, revocable access — no shared credentials or direct project access required. Copying 200 TB defeats the stated goal of avoiding duplication and adds large storage/egress cost, and sharing a service account key is poor practice compared to Analytics Hub's managed sharing. Plain EXTERNAL_QUERY/external tables cannot reach into S3 without BigQuery Omni's cross-cloud engine, and Analytics Hub itself is a sharing layer, not a query execution engine.",
+    bestPractice: "Use BigQuery Omni with BigLake for in-place, cross-cloud analytics without moving data, and use Analytics Hub to share curated datasets externally with fine-grained, revocable access instead of copying data or distributing credentials.",
+    references: ["bq-omni-analytics-hub"]
+  },
+  {
+    id: 32,
+    question: "A healthcare analytics platform stores patient records in BigQuery. Requirements: (1) analysts must run aggregate queries but never see raw SSNs or full names, (2) a compromised analyst credential must not be able to exfiltrate data to a personal Cloud Storage bucket outside the organization, and (3) the security team, not Google, must be able to prove they can cryptographically destroy all data on demand. Which set of controls satisfies all three, correctly matched?",
+    topic: "Security",
+    difficulty: "hard",
+    options: [
+      { text: "Cloud DLP de-identification (tokenization/masking) on sensitive columns for requirement 1, a VPC Service Controls perimeter around the project for requirement 2, and CMEK via Cloud KMS for requirement 3", correct: true },
+      { text: "CSEK for requirement 3 since it also allows instant cryptographic destruction, the IAM Data Viewer role alone for requirement 1, and firewall rules for requirement 2", correct: false },
+      { text: "Column-level security (policy tags) alone satisfies all three requirements without DLP, VPC Service Controls, or CMEK", correct: false },
+      { text: "CMEK for requirement 1, DLP for requirement 2, and VPC Service Controls for requirement 3", correct: false }
+    ],
+    explanation: "Each requirement maps to a distinct control. Cloud DLP de-identification tokenizes or masks SSNs/names so analysts see redacted values while aggregate queries over other columns still function. VPC Service Controls establishes a service perimeter that blocks data movement to resources outside it, such as a personal Cloud Storage bucket, even with valid credentials, which directly addresses exfiltration. CMEK via Cloud KMS lets the security team destroy a key version themselves, instantly rendering all CMEK-protected data unreadable independent of Google. CSEK isn't supported on BigQuery at all, so it cannot serve requirement 3 here; IAM roles alone don't mask column contents; policy tags govern column access but provide neither a network exfiltration boundary nor customer-held key destruction.",
+    bestPractice: "Layer controls by the specific risk each addresses: DLP for content-level de-identification, VPC Service Controls for network/API exfiltration boundaries, and CMEK for customer-controlled cryptographic destruction — no single control covers all three.",
+    references: ["security-dlp-vpcsc", "cmek-encryption"]
   }
 ];
 
@@ -2149,5 +2329,414 @@ Set a project-wide maximum_bytes_billed default, add custom daily quotas for ana
       "Use INFORMATION_SCHEMA.JOBS_BY_PROJECT to attribute cost before adding capacity"
     ],
     externalLink: "https://cloud.google.com/bigquery/docs/best-practices-costs"
+  },
+  {
+    id: "bigtable-rowkey-design",
+    title: "Bigtable Row Key Design and Hotspotting",
+    category: "Bigtable",
+    content: `Row key design is the single most important decision in a Bigtable schema — it determines both query performance and write distribution.
+
+How Bigtable Shards Data:
+- Rows are stored in a single sorted-string table, ordered lexicographically by row key
+- The table is split into tablets, each owning a contiguous key range
+- A tablet is served by exactly one node at a time; write/read load for a key range goes to that node
+
+Hotspotting — the classic mistake:
+- Leading a row key with a monotonically increasing value (current timestamp, auto-increment ID, sequential counter) means all recent writes share a near-identical, always-growing prefix
+- Every concurrent write lands in the same (newest) tablet range, overloading one node while others idle
+- Adding nodes does NOT fix this — tablet assignment is key-range based, not round-robin
+
+Fixes:
+1. Field promotion: lead with a high-cardinality, evenly distributed field (device_id, user_id, a hash) instead of time
+2. Salting: prepend a computed hash bucket (e.g., hash(key) % N) to spread a hot key range across N prefixes
+3. Reverse timestamps: within a per-entity prefix, store (Long.MAX - timestamp) as a suffix to get recent-first ordering without leading the key with time
+
+Other row key rules:
+- Keep row keys short — they're repeated in every column's storage and in every index
+- Design for the read pattern first (Bigtable has no secondary indexes; only row key prefix and range scans are efficient)
+- Human-readable, sortable keys (e.g., "device123#reverse_ts") aid debugging without hurting distribution, as long as the leading segment is well distributed`,
+    keyPoints: [
+      "Row keys are sorted lexicographically and sharded into contiguous tablets",
+      "Never lead a row key with a monotonically increasing value (timestamp, auto-increment ID)",
+      "Fix hotspots with field promotion (lead with a distributed field), salting, or reversed-timestamp suffixes",
+      "Adding nodes does not fix hotspotting — it's a key-range problem, not a capacity problem"
+    ],
+    externalLink: "https://cloud.google.com/bigtable/docs/schema-design"
+  },
+  {
+    id: "bigtable-service-selection",
+    title: "Bigtable: Column Families and When to Choose It",
+    category: "Bigtable",
+    content: `Bigtable is a sparse, wide-column NoSQL database for massive-scale, low-latency, single-key access patterns.
+
+When Bigtable Is the Right Choice:
+- Very high throughput: millions of reads/writes per second, scaling linearly by adding nodes
+- Latency requirement: single-digit-millisecond reads/writes by row key
+- Access pattern: point lookups or range scans by row key prefix — no joins, no multi-row ACID transactions, no secondary indexes
+- Typical uses: time-series/IoT telemetry, user/session state, ad-tech bidding data, recommendation feature serving
+
+When to Choose Something Else:
+- Need SQL, joins, or multi-row transactions → Cloud Spanner or Cloud SQL
+- Need flexible documents, offline sync, small-to-medium scale → Firestore
+- Need OLAP aggregation over large historical scans → BigQuery
+- Sub-1TB dataset or low, spiky throughput → Bigtable's operational overhead usually isn't justified
+
+Column Families:
+- Columns are grouped into families, defined at table creation (schema changes require an admin operation)
+- Each family has its own garbage-collection policy (max versions, max age) and is stored together on disk
+- Group columns by shared access pattern and lifecycle: a "state" family read on every request should be separate from a rarely-read "audit" family, so a read of one doesn't pull the other's data
+- Within a family, columns can be created dynamically per row (sparse schema) — no ALTER TABLE for new columns
+
+Design Guidance:
+- Fewer, well-chosen families beat many fine-grained ones; each family adds storage/read overhead
+- Co-locate columns that are always read together; separate columns with different write frequency or retention needs`,
+    keyPoints: [
+      "Choose Bigtable for high-throughput, low-latency, single-key access with no joins or secondary indexes",
+      "Prefer Spanner/Cloud SQL for relational needs, Firestore for flexible documents, BigQuery for OLAP",
+      "Column families group columns with the same access pattern and garbage-collection policy",
+      "Group frequently-read-together columns into one family to avoid pulling unrelated data"
+    ],
+    externalLink: "https://cloud.google.com/bigtable/docs/overview"
+  },
+  {
+    id: "composer-orchestration",
+    title: "Cloud Composer for Multi-System Batch Orchestration",
+    category: "Orchestration",
+    content: `Cloud Composer is managed Apache Airflow, used to orchestrate dependencies between heterogeneous data jobs.
+
+Core Concepts:
+- DAG (Directed Acyclic Graph): defines tasks and their dependencies (task B runs only after task A succeeds)
+- Operators: pre-built integrations to trigger and monitor Dataflow, Dataproc, BigQuery, Cloud Functions, and external systems
+- Sensors: wait for an external condition (a file landing in GCS, a job finishing) before downstream tasks proceed
+- Retries and SLAs: per-task retry counts, backoff, and SLA-miss alerting configured declaratively
+
+When Composer Is the Right Tool:
+- A pipeline spans multiple compute systems (e.g., Dataflow → Dataproc → BigQuery) with real dependencies between steps
+- You need backfill: re-running the DAG logic for an arbitrary past date
+- You need a monitoring UI showing task-level success/failure history and duration trends
+
+When to Choose Something Else:
+- Cloud Workflows: lighter-weight, serverless orchestration of a small number of API/service calls; less operational overhead but no native backfill and a simpler dependency/retry model
+- Dataform: orchestration scoped to SQL/BigQuery-native transformations only, not external compute jobs
+- Cloud Scheduler: fire-and-forget triggering with no dependency tracking between the jobs it triggers
+
+Cost and Operational Notes:
+- Composer runs a persistent GKE-based environment, so there's a baseline cost even when no DAGs are running
+- Composer 2 supports autoscaling workers, reducing (but not eliminating) idle cost
+- Right-size environment size to DAG complexity and concurrency needs, not to peak job compute (Composer schedules and monitors; the actual heavy compute runs in Dataflow/Dataproc/BigQuery)`,
+    keyPoints: [
+      "Composer/Airflow fits multi-system DAGs needing dependencies, sensors, retries, and backfill",
+      "Cloud Workflows suits lighter orchestration of a handful of API calls, but lacks native backfill",
+      "Dataform orchestrates BigQuery SQL transformations only, not external Dataflow/Dataproc jobs",
+      "Composer has a persistent baseline cost since it runs on a managed GKE environment"
+    ],
+    externalLink: "https://cloud.google.com/composer/docs/concepts/overview"
+  },
+  {
+    id: "data-catalog-lineage",
+    title: "Dataplex, Data Catalog, and Data Lineage",
+    category: "Governance",
+    content: `Governance at scale requires searchable metadata, access-tied tagging, and automatic lineage — not manual documentation.
+
+Data Catalog (part of Dataplex):
+- A searchable metadata catalog across BigQuery, Pub/Sub, Cloud Storage, and more
+- Technical metadata (schema, size, last modified) is captured automatically
+- Business metadata is added via tags and tag templates (e.g., a "PII" tag template with a sensitivity field)
+
+Policy Tags and Column-Level Security:
+- Policy tags attach to BigQuery columns and are enforced by IAM: a user without the right policy tag role sees the column blocked or masked, even with full table access
+- This ties governance tags directly to enforcement, unlike a spreadsheet or wiki describing "who should" have access
+
+Data Lineage:
+- Automatically captured for supported integrations (BigQuery SQL jobs, Dataflow, Data Fusion, Composer-orchestrated pipelines)
+- Shows upstream sources and downstream consumers of a table or file, and the job that produced each edge
+- Answers "what fed this table" and "what breaks if I change this table" without manual tracing through job configs or tribal knowledge
+
+Why Not Just Use Job History or Access Logs:
+- INFORMATION_SCHEMA.JOBS shows individual BigQuery query jobs, not a cross-system lineage graph, and captures nothing about Dataflow/external sources
+- Cloud Audit Logs Data Access logs record who read/wrote what and when — access history, not derivation lineage or governance tags
+- Manual documentation (spreadsheets, wikis) drifts out of date the moment a pipeline changes and doesn't scale past a handful of tables
+
+Practical Setup:
+- Enable lineage on your BigQuery, Dataflow, and Composer pipelines
+- Apply policy tags to PII columns at the source dataset so protection propagates to any view built on top
+- Use Data Catalog search as the front door for "what data exists and who owns it" instead of tribal knowledge`,
+    keyPoints: [
+      "Data Catalog/Dataplex provides searchable metadata plus tagging tied to real IAM enforcement",
+      "Policy tags enforce column-level access, not just document intended access",
+      "Lineage is captured automatically for BigQuery, Dataflow, Data Fusion, and Composer pipelines",
+      "Job history and audit logs show query/access events, not a derivation graph or governance tags"
+    ],
+    externalLink: "https://cloud.google.com/dataplex/docs/lineage"
+  },
+  {
+    id: "vertex-ai-feature-store",
+    title: "Vertex AI Feature Store: Avoiding Training/Serving Skew",
+    category: "Vertex AI",
+    content: `Feature Store centralizes feature computation so training and online serving use identical values.
+
+The Skew Problem:
+- Training pipelines often compute features in batch (e.g., a BigQuery SQL rolling aggregate)
+- Serving pipelines often recompute the "same" feature on the fly, in a different language/framework, under latency pressure
+- Small differences in windowing, null handling, or timing between the two implementations cause training/serving skew — the model sees different feature semantics at inference than it learned from
+
+How Feature Store Fixes This:
+- Features are computed once and registered as entities/features in Feature Store
+- Offline store: supports point-in-time correct lookups for building training datasets (no future data leakage)
+- Online store: serves the latest values for a given entity with low latency for real-time inference
+- Both stores serve the same underlying feature definitions, removing the two-implementation problem entirely
+
+When to Use It:
+- Any model where the same feature is needed both for training (batch/historical) and online serving (real-time)
+- Especially valuable when features are expensive aggregates (rolling windows, joins) that would otherwise be duplicated in application code
+
+What It Doesn't Solve:
+- It doesn't replace the need for a feature engineering pipeline — something still has to compute and write features into the store
+- It doesn't fix latency if the underlying feature computation itself is slow; it fixes duplication and inconsistency, not raw compute cost`,
+    keyPoints: [
+      "Training/serving skew comes from two separate implementations computing 'the same' feature differently",
+      "Feature Store computes each feature once and serves it identically to offline (training) and online (serving) consumers",
+      "The offline store supports point-in-time correct lookups to avoid label leakage",
+      "Feature Store removes duplication and inconsistency; it doesn't replace the feature computation pipeline itself"
+    ],
+    externalLink: "https://cloud.google.com/vertex-ai/docs/featurestore/overview"
+  },
+  {
+    id: "vertex-ai-training-deployment",
+    title: "Vertex AI: Training and Serving Mode Selection",
+    category: "Vertex AI",
+    content: `Choosing between AutoML and custom training, and between online endpoints and batch prediction, depends on control needs and access pattern.
+
+AutoML vs. Custom Training:
+- AutoML: no-code/low-code, Google selects and tunes the model architecture; fast to start, less control
+- Custom training: you supply the training code/container (any framework — PyTorch, TensorFlow, XGBoost), choose the architecture, and select machine/accelerator types (including GPUs/TPUs)
+- Choose custom training whenever the team needs a specific architecture, has existing model code, or needs capabilities AutoML doesn't expose
+
+Online Endpoints vs. Batch Prediction:
+- Online endpoint: a persistently deployed, autoscaling service for low-latency request/response inference; billed for provisioned node time whether or not requests arrive
+- Batch Prediction: a managed job that reads inputs from Cloud Storage/BigQuery, runs inference across distributed workers, writes outputs, and then stops — billed only for the run
+- Rule of thumb: if the workload is "score N items at some point," use Batch Prediction; if it's "respond to individual requests as they arrive," use an online endpoint
+
+Common Mistake:
+- Deploying an online endpoint and looping over it for a large offline batch wastes money on idle-node billing and underuses the parallelism Batch Prediction provides natively
+- Conversely, using Batch Prediction for a user-facing feature that needs sub-second responses won't meet the latency requirement — it's designed for throughput, not per-request latency
+
+Cost Pattern:
+- Online endpoint: continuous cost proportional to provisioned nodes/hours, regardless of traffic
+- Batch Prediction: cost proportional to the actual scoring job's compute time, nothing between runs`,
+    keyPoints: [
+      "Custom training gives architecture control that AutoML does not",
+      "Online endpoints suit low-latency request/response and bill continuously for provisioned nodes",
+      "Batch Prediction suits large offline scoring jobs and only bills for the run itself",
+      "Looping requests into an online endpoint for a bulk job wastes cost versus using Batch Prediction"
+    ],
+    externalLink: "https://cloud.google.com/vertex-ai/docs/predictions/batch-predictions"
+  },
+  {
+    id: "dataform-elt",
+    title: "Dataform: ELT for BigQuery-Native SQL Transformations",
+    category: "Dataform",
+    content: `Dataform manages SQL-based ELT transformations that run entirely inside BigQuery.
+
+ETL vs. ELT:
+- ETL: transform data before it lands in the warehouse (e.g., Dataflow), useful when logic is non-SQL, needs streaming, or must run before storage
+- ELT: load raw data into the warehouse first, then transform using the warehouse's own compute (BigQuery SQL) — useful when transformations are expressible in SQL and don't need to happen before landing
+
+What Dataform Provides:
+- Version-controlled SQL, organized as "models" (tables/views) with ref() calls between them
+- Automatic dependency graph: Dataform infers execution order from which models reference which
+- Built-in data quality assertions: uniqueness, not-null, custom SQL-based tests, run as part of the same pipeline
+- Scheduled execution (including via Composer/Cloud Scheduler integration) and environment/workspace management for dev vs. prod
+
+When to Choose Dataform:
+- All transformation logic is expressible in SQL against data already in (or trivially loadable into) BigQuery
+- The team wants tests and a dependency graph without hand-rolling both in a general-purpose orchestrator
+
+When Not To:
+- Non-SQL logic (custom parsing, ML inference, calling external APIs) — use Dataflow or a custom job
+- True streaming/low-latency requirements — use Dataflow
+- Orchestrating heterogeneous external systems (multiple compute engines, waiting on external events) — use Composer alongside or instead of Dataform`,
+    keyPoints: [
+      "ELT (transform after loading, in-warehouse) fits when transformations are pure SQL",
+      "Dataform auto-builds a dependency graph from ref() calls and supports built-in data quality assertions",
+      "Reserve Dataflow/ETL for non-SQL logic, streaming, or transforms needed before landing in the warehouse",
+      "Dataform orchestrates BigQuery SQL models only, not external compute jobs like Dataflow or Dataproc"
+    ],
+    externalLink: "https://cloud.google.com/dataform/docs/overview"
+  },
+  {
+    id: "dataflow-exactly-once-watermarks",
+    title: "Dataflow Watermarks, Late Data, and Exactly-Once Sinks",
+    category: "Dataflow",
+    content: `Correcting streaming aggregates for late-arriving data requires coordinating trigger mode, allowed lateness, and idempotent writes.
+
+Watermarks:
+- A watermark is Dataflow's estimate of "no more data with an event time earlier than this will arrive"
+- It's what allows a window to close and a default (ON_TIME) trigger to fire — it is not itself a bypass or shortcut setting
+
+Allowed Lateness:
+- withAllowedLateness(duration) extends how long a window continues to accept and re-trigger on late data after the watermark has passed the window's end
+- After allowed lateness expires, further late data for that window is dropped
+
+Accumulating vs. Discarding Trigger Mode:
+- Discarding: each firing emits only the new elements accumulated since the last firing (a delta) — useful for append-only sinks tracking incremental changes
+- Accumulating: each firing emits the full, updated result for the window including all data seen so far — necessary if you need a single corrected total per window rather than a series of deltas to sum yourself
+
+Exactly-Once Sink Writes:
+- Dataflow's internal processing provides effectively-once semantics for state and side effects within the pipeline
+- Achieving exactly-once at an external sink (like BigQuery) when a window can re-fire (due to late data or retries) requires idempotent writes — e.g., MERGE/UPSERT keyed by a stable identifier (window start/end, or a natural key), not a plain append-only INSERT which would create duplicate rows per re-fire
+
+Putting It Together:
+- allowedLateness + accumulating mode + MERGE-keyed writes = a corrected total per window with no duplicate rows
+- allowedLateness + discarding mode + append-only writes = a stream of deltas, useful only if the downstream consumer sums them itself`,
+    keyPoints: [
+      "Watermarks trigger window closure; they are not a setting that can be bypassed to force early processing",
+      "allowedLateness extends how long a window keeps accepting and re-triggering on late data",
+      "Accumulating mode emits the full corrected result per firing; discarding mode emits only the delta",
+      "Exactly-once at an external sink requires idempotent writes (MERGE/UPSERT), not plain append-only inserts, when windows can re-fire"
+    ],
+    externalLink: "https://cloud.google.com/dataflow/docs/concepts/streaming-with-cloud-pubsub"
+  },
+  {
+    id: "pubsub-schema-dlq",
+    title: "Pub/Sub Schemas, Dead-Letter Topics, and Kafka Comparison",
+    category: "Pub/Sub",
+    content: `Protecting shared Pub/Sub topics from bad producers requires schema enforcement and dead-letter handling, not just retries.
+
+Schema Enforcement:
+- A schema (Avro or Protobuf) can be attached to a topic
+- Publish calls that don't conform to the registered schema are rejected at publish time, before any subscriber ever receives the message
+- This stops a producer's bad deploy from ever reaching downstream consumers, rather than relying on consumers to validate defensively
+
+Dead-Letter Policies:
+- Configured per subscription with a max delivery attempts count
+- After a message fails to be acknowledged that many times, Pub/Sub forwards it to a separate dead-letter topic instead of redelivering it indefinitely
+- This prevents a single malformed or unprocessable message from crash-looping a consumer forever, and isolates the bad message for inspection without blocking the rest of the stream
+
+What Doesn't Fix a Crash Loop:
+- Increasing ack deadline: gives more time to process a message, but a malformed message will still fail deterministically regardless of time given
+- Increasing message retention: affects how long unacked/unprocessed messages remain available for redelivery, not whether processing succeeds
+
+Pub/Sub vs. Kafka (Managed Service for Apache Kafka):
+- Pub/Sub: fully managed, no partitions/brokers to size, automatic scaling, schema and DLQ features built in, pay-per-use
+- Kafka: log-based semantics with consumer-group offset control, ecosystem compatibility (Kafka Connect, Kafka Streams), but requires managing partitions/brokers (even in the managed service) and its own schema registry for equivalent protection
+- Migrating to Kafka does not, by itself, solve a schema-validation or dead-letter problem — equivalent protections must be configured there too; the choice between them should be driven by ecosystem/ordering/partitioning needs, not by an assumption that one is inherently safer`,
+    keyPoints: [
+      "A Pub/Sub schema rejects non-conforming messages at publish time, before subscribers see them",
+      "Dead-letter policies move repeatedly-failing messages to a separate topic instead of retrying forever",
+      "Ack deadline and retention settings do not fix a message that deterministically fails to process",
+      "Kafka requires its own schema registry and dead-letter handling for equivalent protection — switching platforms doesn't solve this by itself"
+    ],
+    externalLink: "https://cloud.google.com/pubsub/docs/schemas"
+  },
+  {
+    id: "bq-scripting-procedures",
+    title: "BigQuery Scripting, Time Travel, and Fail-Safe",
+    category: "BigQuery",
+    content: `BigQuery supports multi-statement scripts, stored procedures, and point-in-time recovery mechanisms beyond simple query execution.
+
+Multi-Statement Scripts and Procedures:
+- BEGIN...END blocks allow multiple SQL statements, variables (DECLARE/SET), and control flow (IF, WHILE, loops) in one script
+- CREATE PROCEDURE packages reusable multi-statement logic, callable with CALL
+- Useful for orchestrating a sequence of DDL/DML without an external orchestrator, for logic that's simple enough to stay in SQL
+
+Table Snapshots:
+- CREATE SNAPSHOT TABLE captures a table's state at a point in time, at low cost (billed only for data that differs from the source)
+- Explicit, named, and long-lived (not subject to the 2-7 day time travel window) — the right tool before a risky bulk DML or script
+- Can be queried directly or used to restore a table
+
+Time Travel:
+- BigQuery retains historical versions of a table's data for a configurable window (default 7 days, adjustable 2-7 days per dataset)
+- FOR SYSTEM_TIME AS OF <timestamp> queries the table as it existed at that time
+- Enables self-service recovery from accidental DML (bad UPDATE/DELETE) without a separate backup, as long as it's caught within the window
+
+Fail-Safe:
+- A further retention period (currently 7 days) that begins after time travel expires
+- NOT queryable directly by customers — it exists solely so Google can assist with data recovery in exceptional cases
+- Should not be relied upon as a self-service recovery mechanism; time travel and snapshots are the self-service tools
+
+Recovery Priority:
+1. Time travel (fastest, self-service, works for any accidental DML within the window)
+2. Table snapshot (if one was taken before the incident)
+3. External backup/export (slower, may have more data loss)
+4. Fail-safe (Google-assisted only, last resort, not self-service)`,
+    keyPoints: [
+      "BigQuery scripting supports BEGIN...END blocks, variables, control flow, and stored procedures",
+      "Table snapshots are explicit, long-lived, low-cost point-in-time copies — take one before risky scripts or bulk DML",
+      "Time travel (default 7 days) enables self-service FOR SYSTEM_TIME AS OF recovery from accidental DML",
+      "Fail-safe extends retention further but is not customer-queryable — it's for Google-assisted recovery only"
+    ],
+    externalLink: "https://cloud.google.com/bigquery/docs/time-travel"
+  },
+  {
+    id: "bq-omni-analytics-hub",
+    title: "BigQuery Omni, BigLake, and Analytics Hub",
+    category: "BigQuery",
+    content: `Cross-cloud analytics and external data sharing without duplicating data.
+
+BigQuery Omni:
+- Runs the BigQuery query engine inside AWS or Azure, physically close to data stored in S3 or Azure Blob Storage
+- Queries execute where the data lives, avoiding the need to copy it into GCP and avoiding cross-cloud egress for the query itself
+- Results can be brought back to GCP (a smaller amount of data than the source) when needed
+
+BigLake:
+- Provides a unified table abstraction over data in Cloud Storage, S3, or Azure Blob Storage, with fine-grained (row/column-level) access control enforced consistently regardless of the underlying storage engine (BigQuery, Spark, etc.)
+- BigQuery Omni uses BigLake tables to expose external-cloud data as queryable BigQuery tables without copying it
+
+Analytics Hub:
+- A data sharing platform: a data provider publishes curated datasets/views as "listings" in an exchange
+- Subscribers (internal teams or external partners) attach to a listing and query it with access controlled and revocable by the publisher, without ever receiving copies of the underlying data or direct project/credential access
+- Distinct from Omni/BigLake: Analytics Hub is about controlled sharing/distribution, not cross-cloud query execution
+
+Choosing Between Them:
+- Need to query data that lives in another cloud, in place → BigQuery Omni + BigLake
+- Need to expose curated internal data to another team or an external partner without copying it or sharing credentials → Analytics Hub
+- Both can be combined: query cross-cloud data via Omni/BigLake, then publish the curated result as an Analytics Hub listing
+
+Anti-Patterns:
+- Bulk-copying large external datasets into GCP purely to enable a join, when Omni could query them in place
+- Sharing service account keys or IAM roles directly with an external partner instead of using Analytics Hub's listing model`,
+    keyPoints: [
+      "BigQuery Omni runs the query engine in AWS/Azure to query S3/Blob data in place, avoiding duplication and query-time egress",
+      "BigLake provides a unified, access-controlled table abstraction over external-cloud storage",
+      "Analytics Hub publishes curated datasets as listings for controlled, revocable sharing without copying data or credentials",
+      "Omni/BigLake solve cross-cloud query execution; Analytics Hub solves controlled distribution — they compose together"
+    ],
+    externalLink: "https://cloud.google.com/bigquery/docs/omni-introduction"
+  },
+  {
+    id: "security-dlp-vpcsc",
+    title: "Layered Data Security: DLP, VPC Service Controls, and Key Management",
+    category: "Security",
+    content: `No single control covers content-level protection, network exfiltration, and key custody — each requires a distinct mechanism.
+
+Cloud DLP De-identification:
+- Detects and transforms sensitive data (SSNs, names, credit card numbers) via tokenization, masking, or redaction
+- Can be applied to data at rest (batch de-identify a BigQuery table/column) or in transit (Dataflow DLP transform)
+- Solves: "authorized users should never see raw sensitive values," even though they can still run aggregate/analytical queries over the de-identified data
+
+VPC Service Controls (VPC-SC):
+- Defines a service perimeter around GCP resources (projects, APIs)
+- Blocks data from being copied to or accessed from outside the perimeter, even by a principal with valid IAM credentials — this specifically stops credential-based exfiltration to an external bucket/project
+- Solves: "a compromised or malicious credential should not be able to move data outside the trust boundary"
+- Distinct from firewall rules, which control network traffic paths, not API-level data egress across projects/services
+
+CMEK vs. CSEK for Key Custody:
+- CMEK (Cloud KMS-backed): supported broadly across BigQuery, Cloud Storage, Dataflow, Pub/Sub, Cloud SQL, Spanner; the customer holds the key and can disable/destroy a key version to render data permanently unreadable, independent of Google
+- CSEK (customer-supplied): the customer provides raw key material with each request; supported only on Cloud Storage and Compute Engine — NOT BigQuery — and requires the customer to manage key transport and storage themselves
+- Solves: "prove the organization, not the cloud provider, controls ultimate data destructibility"
+
+Common Mismatches to Avoid:
+- Expecting IAM roles alone to mask column-level content (they control table/dataset access, not per-value redaction)
+- Expecting CSEK to work on BigQuery (it doesn't — use CMEK there)
+- Expecting firewall rules to stop authenticated API-level exfiltration (that's VPC-SC's job)
+- Expecting policy tags alone to provide a network boundary or key destruction capability (they control column-level access only)`,
+    keyPoints: [
+      "Cloud DLP de-identification masks/tokenizes sensitive column values while preserving aggregate query utility",
+      "VPC Service Controls blocks credential-authenticated data movement outside a defined perimeter — firewalls do not",
+      "CMEK gives the customer key destruction; CSEK is Cloud Storage/Compute Engine only and unsupported on BigQuery",
+      "Content masking, network exfiltration boundaries, and key custody are three separate problems needing three separate controls"
+    ],
+    externalLink: "https://cloud.google.com/vpc-service-controls/docs/overview"
   }
 ];
